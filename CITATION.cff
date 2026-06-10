@@ -13,6 +13,14 @@ license: MIT
 authors:
   - family-names: Khaybulin
     given-names: Aidar
+    email: "batmeny@gmail.com"
+    orcid: https://orcid.org/0009-0007-9731-9331
+  - family-names: Zatonskaya
+    given-names: Anna
+    orcid: https://orcid.org/0000-0003-4877-207X
+  - family-names: Panchenko
+    given-names: Alexander
+    orcid: https://orcid.org/0009-0009-9104-1214
 date-released: "2026-06-10"
 repository-code: "https://github.com/Oidorrr/QDebrisFlow"
 keywords:
