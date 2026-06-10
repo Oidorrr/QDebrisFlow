@@ -14,11 +14,12 @@ authors:
   - family-names: Khaybulin
     given-names: Aidar
 date-released: "2026-06-10"
-repository-code: "https://github.com/your/repo"
+repository-code: "https://github.com/Oidorrr/QDebrisFlow"
 keywords:
-  - debris flow
-  - mudflow
-  - hazard
-  - rheology
-  - post-fire
-  - QGIS
+  - post-wildfire debris flows
+  - hydrodynamic modeling
+  - QGIS plugin
+  - O’Brien rheology
+  - Local Inertial Approximation
+  - LLM assistant
+  - model verification
