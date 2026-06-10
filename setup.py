@@ -20,7 +20,7 @@ setup(
     ),
     author="Aidar Khaybulin",
     license="MIT",
-    url="https://github.com/your/repo",
+    url="https://github.com/Oidorrr/QDebrisFlow",
     python_requires=">=3.7",
     packages=find_packages(
         include=[
