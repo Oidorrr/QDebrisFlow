@@ -928,7 +928,7 @@ class DebrisFlowDialog(QDialog):
         self._sweep_results  = []
         self._sweep_best_pkg = None
         self.setWindowTitle(
-            "Debris Flow Modelling — O'Brien Quadratic  (v1.9.3)")
+            "Debris Flow Modelling — O'Brien Quadratic  (v1.0)")
         self.setMinimumWidth(660)
         self.resize(740, 580)
         self._build_ui()
@@ -2174,7 +2174,7 @@ class DebrisFlowDialog(QDialog):
         Collect all parameters from the UI and write them to a JSON file.
         File structure:
           {
-            "version": "1.9.2",
+            "version": "1.0",
             "layers": { "dem_name": ..., "source_name": ... },
             "hydrographs": { "<fid>": {type, q_const/times/q_vals}, ... },
             "source_table": [ {fid, name, q_max}, ... ],
@@ -2261,7 +2261,7 @@ class DebrisFlowDialog(QDialog):
         }
 
         payload = {
-            "version":      "1.9.2",
+            "version":      "1.0",
             "layers":       layers_sec,
             "source_table": table_rows,
             "hydrographs":  hydro_sec,
