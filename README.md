@@ -185,3 +185,7 @@ Copyright © 2026 Aidar Khaybulin.
 
 If you use this software, please cite it using the metadata in
 [`CITATION.cff`](CITATION.cff).
+
+## Acknowledgments
+
+The code generation, testing, and documentation were supported by the language models Claude (Anthropic)
