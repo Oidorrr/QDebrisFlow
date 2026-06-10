@@ -1,0 +1,16 @@
+[general]
+name=QDebrisFlow
+qgisMinimumVersion=3.16
+description=Modelling of post-fire debris flows (O'Brien quadratic rheology + LIA). Individual source hydrographs, 5-tab interface, output layer selection, LHS analysis.
+version=1.0
+author=Debris Flow Model
+email=your@email.com
+about=Models post-fire debris flows based on the quadratic rheological model of O'Brien and Julien (1985, 1988) and the local inertial approximation of the shallow water equations (LIA). Based on the FLO-2D formulation. Outputs: maximum depth envelope (h_max), maximum velocity (V_max), final deposit (h_final), flow arrival time map.
+tracker=https://github.com/your/repo/issues
+repository=https://github.com/your/repo
+tags=debris flow,mudflow,hazard,rheology,post-fire
+homepage=https://github.com/your/repo
+category=Raster
+icon=icon.png
+experimental=True
+deprecated=False
