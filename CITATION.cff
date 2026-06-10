@@ -1,0 +1,24 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: QDebrisFlow
+abstract: >-
+  QGIS plugin that models post-fire debris flows based on the quadratic
+  rheological model of O'Brien and Julien (1985, 1988) and the local inertial
+  approximation of the shallow water equations (LIA). Based on the FLO-2D
+  formulation. Outputs: maximum depth envelope (h_max), maximum velocity
+  (V_max), final deposit (h_final), flow arrival time map.
+type: software
+version: "1.0"
+license: MIT
+authors:
+  - family-names: Khaybulin
+    given-names: Aidar
+date-released: "2026-06-10"
+repository-code: "https://github.com/your/repo"
+keywords:
+  - debris flow
+  - mudflow
+  - hazard
+  - rheology
+  - post-fire
+  - QGIS

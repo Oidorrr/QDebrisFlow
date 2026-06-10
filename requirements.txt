@@ -1,0 +1,10 @@
+# Python dependencies for QDebrisFlow (QGIS plugin)
+#
+# Installable via pip:
+numpy
+numba          # JIT acceleration; required to run simulations from the plugin GUI
+#
+# Provided by the QGIS installation (do NOT install via pip):
+#   - PyQt5            -> qgis.PyQt
+#   - QGIS Python API  -> qgis.core, qgis.gui   (QGIS >= 3.16)
+#   - GDAL / OGR       -> osgeo (gdal, ogr, osr)
