@@ -178,6 +178,11 @@ def run_one_sample(args: dict) -> dict:
             eta_direct       = eta,
             manning_n        = n_man,
             K_visc           = k_val,
+            entrain_coef           = args.get("entrain_coef", 0.1),
+            bed_friction_angle_deg = args.get("bed_friction_angle_deg", 37.0),
+            Cv_bed                 = args.get("Cv_bed", 0.0),
+            pore_pressure_lambda0   = args.get("pore_pressure_lambda0", 0.0),
+            pore_consolidation_time = args.get("pore_consolidation_time", 600.0),
             h_min            = _H_MIN,
         )
 
@@ -203,6 +208,10 @@ def run_one_sample(args: dict) -> dict:
             t_end      = args["t_end"],
             dt_max     = args["dt_max"],
             cfl_number = args["cfl_number"],
+            slope_correction = args.get("slope_correction", False),
+            eight_connectivity = args.get("eight_connectivity", False),
+            entrainment = args.get("entrainment", False),
+            two_phase = args.get("two_phase", False),
         )
 
         result = DebrisFlowSolver2D(

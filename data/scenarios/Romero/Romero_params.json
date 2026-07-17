@@ -1,0 +1,147 @@
+{
+  "version": "1.9.2",
+  "layers": {
+    "dem_name": "10m_from5mDEM_Romero",
+    "source_name": "Line_romero_creek"
+  },
+  "source_table": [
+    {
+      "fid": "0",
+      "name": "1",
+      "q_max_display": "138.7"
+    },
+    {
+      "fid": "1",
+      "name": "5",
+      "q_max_display": "369.9"
+    },
+    {
+      "fid": "2",
+      "name": "2",
+      "q_max_display": "10.0"
+    },
+    {
+      "fid": "3",
+      "name": "3",
+      "q_max_display": "19.1"
+    },
+    {
+      "fid": "4",
+      "name": "4",
+      "q_max_display": "15.7"
+    }
+  ],
+  "hydrographs": {
+    "0": {
+      "type": "table",
+      "times": [
+        0.0,
+        600.0,
+        1200.0
+      ],
+      "q_vals": [
+        0.0,
+        138.716,
+        0.0
+      ],
+      "q_const": 0.0
+    },
+    "1": {
+      "type": "table",
+      "times": [
+        0.0,
+        600.0,
+        1200.0
+      ],
+      "q_vals": [
+        0.0,
+        369.859,
+        0.0
+      ],
+      "q_const": 0.0
+    },
+    "2": {
+      "type": "table",
+      "times": [
+        0.0,
+        600.0,
+        1200.0
+      ],
+      "q_vals": [
+        0.0,
+        9.976,
+        0.0
+      ],
+      "q_const": 0.0
+    },
+    "3": {
+      "type": "table",
+      "times": [
+        0.0,
+        600.0,
+        1200.0
+      ],
+      "q_vals": [
+        0.0,
+        19.056,
+        0.0
+      ],
+      "q_const": 0.0
+    },
+    "4": {
+      "type": "table",
+      "times": [
+        0.0,
+        600.0,
+        1200.0
+      ],
+      "q_vals": [
+        0.0,
+        15.727,
+        0.0
+      ],
+      "q_const": 0.0
+    },
+    "5": {
+      "type": "table",
+      "times": [
+        0.0,
+        600.0,
+        1200.0
+      ],
+      "q_vals": [
+        0.0,
+        29.56,
+        0.0
+      ],
+      "q_const": 0.0
+    }
+  },
+  "obrien": {
+    "Cv": 0.425,
+    "Cv_max": 0.61,
+    "direct_mode": true,
+    "tau_yield": 1.4,
+    "eta": 10.0,
+    "alpha1": 0.0001,
+    "beta1": 13.11,
+    "alpha2": 0.03,
+    "beta2": 16.81,
+    "manning_n": 0.15,
+    "K_visc": 269.153
+  },
+  "solver": {
+    "t_end": 7200,
+    "dt_max": 5.0
+  },
+  "output": {
+    "prefix": "Montecito_2flow_10mfrom1mDEM_v_2_0_3_10Pa_s_1_4_Pa_n_0_13_h_max",
+    "outdir": "W:/KARTOGRAFIA/Айдар/debris_flow_obrien_plugin/Results/10m",
+    "h_max": true,
+    "V_max": true,
+    "h_final": false,
+    "t_arrival": false,
+    "threshold_enabled": false,
+    "threshold_value": 0.1
+  }
+}

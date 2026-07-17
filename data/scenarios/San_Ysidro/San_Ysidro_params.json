@@ -1,0 +1,142 @@
+{
+  "version": "1.9.2",
+  "layers": {
+    "dem_name": "10m_from5mDEM_San_Ysidro",
+    "source_name": "Line_san_ysidro"
+  },
+  "source_table": [
+    {
+      "fid": "0",
+      "name": "3",
+      "q_max_display": "780.8"
+    },
+    {
+      "fid": "1",
+      "name": "1",
+      "q_max_display": "57.4"
+    },
+    {
+      "fid": "2",
+      "name": "4",
+      "q_max_display": "26.1"
+    },
+    {
+      "fid": "3",
+      "name": "2",
+      "q_max_display": "5.7"
+    }
+  ],
+  "hydrographs": {
+    "0": {
+      "type": "table",
+      "times": [
+        0.0,
+        600.0,
+        1200.0
+      ],
+      "q_vals": [
+        0.0,
+        780.8,
+        0.0
+      ],
+      "q_const": 0.0
+    },
+    "1": {
+      "type": "table",
+      "times": [
+        0.0,
+        600.0,
+        1200.0
+      ],
+      "q_vals": [
+        0.0,
+        57.36,
+        0.0
+      ],
+      "q_const": 0.0
+    },
+    "2": {
+      "type": "table",
+      "times": [
+        0.0,
+        600.0,
+        1200.0
+      ],
+      "q_vals": [
+        0.0,
+        26.11,
+        0.0
+      ],
+      "q_const": 0.0
+    },
+    "3": {
+      "type": "table",
+      "times": [
+        0.0,
+        600.0,
+        1200.0
+      ],
+      "q_vals": [
+        0.0,
+        5.73,
+        0.0
+      ],
+      "q_const": 0.0
+    },
+    "4": {
+      "type": "table",
+      "times": [
+        0.0,
+        600.0,
+        1200.0
+      ],
+      "q_vals": [
+        0.0,
+        8.531,
+        0.0
+      ],
+      "q_const": 0.0
+    },
+    "5": {
+      "type": "table",
+      "times": [
+        0.0,
+        600.0,
+        1200.0
+      ],
+      "q_vals": [
+        0.0,
+        29.56,
+        0.0
+      ],
+      "q_const": 0.0
+    }
+  },
+  "obrien": {
+    "Cv": 0.588,
+    "Cv_max": 0.615,
+    "direct_mode": true,
+    "tau_yield": 81.9,
+    "eta": 14.92,
+    "alpha1": 0.0001,
+    "beta1": 13.11,
+    "alpha2": 0.03,
+    "beta2": 16.81,
+    "manning_n": 0.272,
+    "K_visc": 1071.6
+  },
+  "solver": {
+    "t_end": 7200,
+    "dt_max": 10.0
+  },
+  "output": {
+    "prefix": "Best_San_Ysidro_10m",
+    "outdir": "D:/Debris_Flow_Plugin/Results/10m/LHS/San_Ysidro_LHS",
+    "h_max": true,
+    "V_max": false,
+    "h_final": false,
+    "t_arrival": false,
+    "threshold_enabled": true,
+    "threshold_value": 0.5
+  }
+}

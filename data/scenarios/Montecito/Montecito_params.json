@@ -1,0 +1,152 @@
+{
+  "version": "1.9.2",
+  "layers": {
+    "dem_name": "5m_Montecito_32611",
+    "source_name": "Line_montecito"
+  },
+  "source_table": [
+    {
+      "fid": "0",
+      "name": "1",
+      "q_max_display": "704.8"
+    },
+    {
+      "fid": "1",
+      "name": "6",
+      "q_max_display": "121.9"
+    },
+    {
+      "fid": "2",
+      "name": "2",
+      "q_max_display": "13.2"
+    },
+    {
+      "fid": "3",
+      "name": "3",
+      "q_max_display": "7.0"
+    },
+    {
+      "fid": "4",
+      "name": "4",
+      "q_max_display": "8.5"
+    },
+    {
+      "fid": "5",
+      "name": "5",
+      "q_max_display": "29.6"
+    }
+  ],
+  "hydrographs": {
+    "0": {
+      "type": "table",
+      "times": [
+        0.0,
+        600.0,
+        1200.0
+      ],
+      "q_vals": [
+        0.0,
+        704.8,
+        0.0
+      ],
+      "q_const": 0.0
+    },
+    "1": {
+      "type": "table",
+      "times": [
+        0.0,
+        600.0,
+        1200.0
+      ],
+      "q_vals": [
+        0.0,
+        121.9,
+        0.0
+      ],
+      "q_const": 0.0
+    },
+    "2": {
+      "type": "table",
+      "times": [
+        0.0,
+        600.0,
+        1200.0
+      ],
+      "q_vals": [
+        0.0,
+        13.21,
+        0.0
+      ],
+      "q_const": 0.0
+    },
+    "3": {
+      "type": "table",
+      "times": [
+        0.0,
+        600.0,
+        1200.0
+      ],
+      "q_vals": [
+        0.0,
+        6.974,
+        0.0
+      ],
+      "q_const": 0.0
+    },
+    "4": {
+      "type": "table",
+      "times": [
+        0.0,
+        600.0,
+        1200.0
+      ],
+      "q_vals": [
+        0.0,
+        8.531,
+        0.0
+      ],
+      "q_const": 0.0
+    },
+    "5": {
+      "type": "table",
+      "times": [
+        0.0,
+        600.0,
+        1200.0
+      ],
+      "q_vals": [
+        0.0,
+        29.56,
+        0.0
+      ],
+      "q_const": 0.0
+    }
+  },
+  "obrien": {
+    "Cv": 0.435,
+    "Cv_max": 0.61,
+    "direct_mode": true,
+    "tau_yield": 1.41,
+    "eta": 10.0,
+    "alpha1": 0.0001,
+    "beta1": 13.11,
+    "alpha2": 0.03,
+    "beta2": 16.81,
+    "manning_n": 0.15,
+    "K_visc": 269.153
+  },
+  "solver": {
+    "t_end": 7200,
+    "dt_max": 5.0
+  },
+  "output": {
+    "prefix": "Montecito_no_Numba",
+    "outdir": "D:/Debris_Flow_Plugin/Results/30m/LHS/Montecito_LHS",
+    "h_max": true,
+    "V_max": false,
+    "h_final": false,
+    "t_arrival": false,
+    "threshold_enabled": true,
+    "threshold_value": 0.5
+  }
+}

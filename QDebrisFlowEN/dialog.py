@@ -346,6 +346,11 @@ class SimulationWorker(QThread):
                 beta2            = p["beta2"],
                 manning_n        = p["manning_n"],
                 K_visc           = p.get("K_visc", 24.0),
+                entrain_coef           = p.get("entrain_coef", 0.1),
+                bed_friction_angle_deg = p.get("bed_friction_angle_deg", 37.0),
+                Cv_bed                 = p.get("Cv_bed", 0.0),
+                pore_pressure_lambda0   = p.get("pore_pressure_lambda0", 0.0),
+                pore_consolidation_time = p.get("pore_consolidation_time", 600.0),
                 h_min            = _H_MIN,
             )
             self.log_message.emit(obrien.summary())
@@ -361,6 +366,10 @@ class SimulationWorker(QThread):
                 t_end             = p["t_end"],
                 dt_max            = p["dt_max"],
                 cfl_number        = p.get("cfl_number", 0.60),
+                slope_correction  = p.get("slope_correction", False),
+                eight_connectivity = p.get("eight_connectivity", False),
+                entrainment       = p.get("entrainment", False),
+                two_phase         = p.get("two_phase", False),
                 progress_callback = lambda tc, te: (
                     self.progress.emit(tc, te),
                     self.log_message.emit(f"  t = {tc:.0f} s / {te:.0f} s")
@@ -393,6 +402,9 @@ class SimulationWorker(QThread):
                 "h_final":   (_thr(result.h_final),  True),
                 "t_arrival": (np.where(np.isinf(result.t_arrival),
                                        -9999.0, result.t_arrival), False),
+                "z_change":  (result.bed_change,     False),
+                "Cv_final":  (result.cv_final,       True),
+                "lambda_final": (result.lambda_final, True),
             }
 
             paths = {}
@@ -639,6 +651,15 @@ class SweepWorker(QThread):
                 t_end           = p["t_end"],
                 dt_max          = p["dt_max"],
                 cfl_number      = p.get("cfl_number", 0.60),
+                slope_correction = p.get("slope_correction", False),
+                eight_connectivity = p.get("eight_connectivity", False),
+                entrainment     = p.get("entrainment", False),
+                entrain_coef    = p.get("entrain_coef", 0.1),
+                bed_friction_angle_deg = p.get("bed_friction_angle_deg", 37.0),
+                Cv_bed          = p.get("Cv_bed", 0.0),
+                two_phase       = p.get("two_phase", False),
+                pore_pressure_lambda0   = p.get("pore_pressure_lambda0", 0.0),
+                pore_consolidation_time = p.get("pore_consolidation_time", 600.0),
                 depth_threshold = p["depth_threshold"],
             )
 
@@ -1224,6 +1245,78 @@ class DebrisFlowDialog(QDialog):
         fl_n.addRow("K — shape factor [-]:", self.spin_K)
         layout.addWidget(grp_n)
 
+        # Entrainment (Phase 2) — bed erosion/deposition with an evolving Cv field
+        grp_ent = QGroupBox("Bed entrainment (evolving Cv)")
+        grp_ent.setCheckable(True)
+        grp_ent.setChecked(False)
+        grp_ent.setToolTip(
+            "Erode/deposit bed material along the path (Egashira/Takahashi).\n"
+            "The flow bulks up and its concentration Cv evolves toward the\n"
+            "slope-dependent equilibrium, auto-stiffening τy and η via exp(Cv).\n"
+            "OFF reproduces the constant-Cv baseline exactly.")
+        fl_ent = QFormLayout(grp_ent)
+        self.chk_entrain = grp_ent          # the checkable group itself is the toggle
+
+        self.spin_Ke = QDoubleSpinBox()
+        self.spin_Ke.setRange(0.0, 10.0); self.spin_Ke.setValue(0.1)
+        self.spin_Ke.setDecimals(3); self.spin_Ke.setSingleStep(0.05)
+        self.spin_Ke.setToolTip(
+            "K_e — erodibility coefficient (dimensionless).\n"
+            "How fast the bed is entrained; the main calibration knob.\n"
+            "Typical 0.05–1.0; larger → faster bulking.")
+        fl_ent.addRow("K_e — erodibility:", self.spin_Ke)
+
+        self.spin_phi = QDoubleSpinBox()
+        self.spin_phi.setRange(10.0, 50.0); self.spin_phi.setValue(37.0)
+        self.spin_phi.setDecimals(1); self.spin_phi.setSuffix(" °")
+        self.spin_phi.setToolTip(
+            "φ — internal friction angle of the bed material.\n"
+            "Sets the equilibrium concentration Cv_eq(θ) (Takahashi).\n"
+            "Stony debris beds: 30–40°.")
+        fl_ent.addRow("φ — bed friction angle:", self.spin_phi)
+
+        self.spin_Cvbed = QDoubleSpinBox()
+        self.spin_Cvbed.setRange(0.0, 0.8); self.spin_Cvbed.setValue(0.0)
+        self.spin_Cvbed.setDecimals(3); self.spin_Cvbed.setSingleStep(0.01)
+        self.spin_Cvbed.setToolTip(
+            "Cv_bed — solid packing concentration of the bed.\n"
+            "0 → use Cv_max. Typical 0.6–0.65.")
+        fl_ent.addRow("Cv_bed (0 → Cv_max):", self.spin_Cvbed)
+        layout.addWidget(grp_ent)
+
+        # Two-phase pore pressure (Phase 4) — basal pore-pressure ratio λ
+        grp_2ph = QGroupBox("Two-phase pore pressure (λ)")
+        grp_2ph.setCheckable(True)
+        grp_2ph.setChecked(False)
+        grp_2ph.setToolTip(
+            "Basal pore-pressure ratio λ (Iverson) cuts the effective yield stress\n"
+            "by (1−λ): high pore pressure liquefies the base and lets the flow run\n"
+            "farther; λ decays over the consolidation time so the flow stops.\n"
+            "This is the main driver of debris-flow mobility/runout.\n"
+            "OFF (or λ0=0) reproduces the single-phase baseline exactly.")
+        fl_2ph = QFormLayout(grp_2ph)
+        self.chk_2phase = grp_2ph
+
+        self.spin_lam0 = QDoubleSpinBox()
+        self.spin_lam0.setRange(0.0, 0.95); self.spin_lam0.setValue(0.0)
+        self.spin_lam0.setDecimals(3); self.spin_lam0.setSingleStep(0.05)
+        self.spin_lam0.setToolTip(
+            "λ0 — initial / inflow basal pore-pressure ratio (0..1).\n"
+            "0 = drained (baseline); → 1 = fully liquefied (max mobility).\n"
+            "Debris-flow bodies: ~0.6–0.9.")
+        fl_2ph.addRow("λ0 — initial pore pressure:", self.spin_lam0)
+
+        self.spin_Tc = QDoubleSpinBox()
+        self.spin_Tc.setRange(1.0, 100000.0); self.spin_Tc.setValue(600.0)
+        self.spin_Tc.setDecimals(0); self.spin_Tc.setSingleStep(60.0)
+        self.spin_Tc.setSuffix(" s")
+        self.spin_Tc.setToolTip(
+            "T_c — consolidation (drainage) timescale.\n"
+            "Excess pore pressure relaxes toward drained over ~T_c.\n"
+            "Larger → stays mobile longer → longer runout.")
+        fl_2ph.addRow("T_c — consolidation time:", self.spin_Tc)
+        layout.addWidget(grp_2ph)
+
         self._radio_direct.toggled.connect(self._on_rheo_mode)
         self._on_rheo_mode()
         self._update_hstop()
@@ -1269,6 +1362,26 @@ class DebrisFlowDialog(QDialog):
             "  > 0.70    — only on flat terrain, with caution.\n\n"
             "At CFL > 0.9 numerical instability is possible.")
         layout.addRow("CFL number:", self.spin_cfl)
+
+        self.chk_slope = QCheckBox("Steep-slope correction (cosθ)")
+        self.chk_slope.setChecked(False)
+        self.chk_slope.setToolTip(
+            "Measure the driving surface gradient along the bed surface\n"
+            "(true distance dx/cosθ) instead of the horizontal spacing dx.\n"
+            "This turns the effective driving slope from tanθ into sinθ.\n\n"
+            "Recommended ON for steep channels (> ~10–15°); negligible on flats.\n"
+            "OFF reproduces the standard planar FLO-2D baseline exactly.")
+        layout.addRow("", self.chk_slope)
+
+        self.chk_8conn = QCheckBox("8-connectivity (diagonal fluxes)")
+        self.chk_8conn.setChecked(False)
+        self.chk_8conn.setToolTip(
+            "Add diagonal flow paths (8 directions instead of 4), normalized so\n"
+            "the total transport is preserved (cardinal:diagonal = 4:1).\n"
+            "For the LIA shallow-water scheme the 4-direction result is already\n"
+            "nearly isotropic, so the effect is small.\n"
+            "OFF reproduces the standard 4-connectivity baseline exactly.")
+        layout.addRow("", self.chk_8conn)
 
         lbl = QLabel(
             "<i>h_min = 5 mm is fixed automatically for LIA stability.</i>")
@@ -1337,6 +1450,25 @@ class DebrisFlowDialog(QDialog):
             "The time [s] when the flow first reached a cell.\n"
             "Used for evacuation planning.")
         fl_l.addWidget(self.chk_t_arrival)
+
+        self.chk_z_change = QCheckBox("Bed change  (z_change)")
+        self.chk_z_change.setChecked(False)
+        self.chk_z_change.setToolTip(
+            "Net bed elevation change [m] from entrainment.\n"
+            "Negative = erosion, positive = deposition.")
+        fl_l.addWidget(self.chk_z_change)
+
+        self.chk_cv_final = QCheckBox("Final concentration  (Cv_final)")
+        self.chk_cv_final.setChecked(False)
+        self.chk_cv_final.setToolTip(
+            "Final sediment volumetric concentration Cv (entrainment).")
+        fl_l.addWidget(self.chk_cv_final)
+
+        self.chk_lambda = QCheckBox("Pore-pressure ratio  (lambda_final)")
+        self.chk_lambda.setChecked(False)
+        self.chk_lambda.setToolTip(
+            "Final basal pore-pressure ratio λ (two-phase model).")
+        fl_l.addWidget(self.chk_lambda)
 
         layout.addWidget(grp_layers)
 
@@ -2006,6 +2138,15 @@ class DebrisFlowDialog(QDialog):
             seed            = self.spin_seed.value(),
             t_end           = float(self.spin_tend.value()),
             dt_max          = self.spin_dtmax.value(),
+            slope_correction = self.chk_slope.isChecked(),
+            eight_connectivity = self.chk_8conn.isChecked(),
+            entrainment      = self.chk_entrain.isChecked(),
+            entrain_coef     = self.spin_Ke.value(),
+            bed_friction_angle_deg = self.spin_phi.value(),
+            Cv_bed           = self.spin_Cvbed.value(),
+            two_phase        = self.chk_2phase.isChecked(),
+            pore_pressure_lambda0   = self.spin_lam0.value(),
+            pore_consolidation_time = self.spin_Tc.value(),
             out_dir         = out_dir,
             csv_name        = (self.edit_sweep_csv.text().strip()
                                or "sweep_results.csv"),
@@ -2240,12 +2381,21 @@ class DebrisFlowDialog(QDialog):
             "K_visc":      self.spin_K.value(),
             "rho_s":       self.spin_rho_s.value(),
             "rho_w":       self.spin_rho_w.value(),
+            "entrainment": self.chk_entrain.isChecked(),
+            "entrain_coef": self.spin_Ke.value(),
+            "bed_friction_angle_deg": self.spin_phi.value(),
+            "Cv_bed":      self.spin_Cvbed.value(),
+            "two_phase":   self.chk_2phase.isChecked(),
+            "pore_pressure_lambda0": self.spin_lam0.value(),
+            "pore_consolidation_time": self.spin_Tc.value(),
         }
 
         # --- Solver ---
         solver_sec = {
             "t_end":  self.spin_tend.value(),
             "dt_max": self.spin_dtmax.value(),
+            "slope_correction": self.chk_slope.isChecked(),
+            "eight_connectivity": self.chk_8conn.isChecked(),
         }
 
         # --- Output ---
@@ -2256,6 +2406,9 @@ class DebrisFlowDialog(QDialog):
             "V_max":             self.chk_V_max.isChecked(),
             "h_final":           self.chk_h_final.isChecked(),
             "t_arrival":         self.chk_t_arrival.isChecked(),
+            "z_change":          self.chk_z_change.isChecked(),
+            "Cv_final":          self.chk_cv_final.isChecked(),
+            "lambda_final":      self.chk_lambda.isChecked(),
             "threshold_enabled": self.chk_threshold.isChecked(),
             "threshold_value":   self.spin_threshold.value(),
         }
@@ -2400,6 +2553,13 @@ class DebrisFlowDialog(QDialog):
             if "K_visc" in ob: self.spin_K.setValue(ob["K_visc"])
             if "rho_s"  in ob: self.spin_rho_s.setValue(ob["rho_s"])
             if "rho_w"  in ob: self.spin_rho_w.setValue(ob["rho_w"])
+            if "entrain_coef" in ob: self.spin_Ke.setValue(ob["entrain_coef"])
+            if "bed_friction_angle_deg" in ob: self.spin_phi.setValue(ob["bed_friction_angle_deg"])
+            if "Cv_bed" in ob: self.spin_Cvbed.setValue(ob["Cv_bed"])
+            if "entrainment" in ob: self.chk_entrain.setChecked(bool(ob["entrainment"]))
+            if "pore_pressure_lambda0" in ob: self.spin_lam0.setValue(ob["pore_pressure_lambda0"])
+            if "pore_consolidation_time" in ob: self.spin_Tc.setValue(ob["pore_consolidation_time"])
+            if "two_phase" in ob: self.chk_2phase.setChecked(bool(ob["two_phase"]))
             direct = ob.get("direct_mode", True)
             self._radio_direct.setChecked(direct)
             self._radio_exp.setChecked(not direct)
@@ -2411,6 +2571,10 @@ class DebrisFlowDialog(QDialog):
         if sv:
             if "t_end"  in sv: self.spin_tend.setValue(int(sv["t_end"]))
             if "dt_max" in sv: self.spin_dtmax.setValue(sv["dt_max"])
+            if "slope_correction" in sv:
+                self.chk_slope.setChecked(bool(sv["slope_correction"]))
+            if "eight_connectivity" in sv:
+                self.chk_8conn.setChecked(bool(sv["eight_connectivity"]))
 
         # --- Output ---
         out = data.get("output", {})
@@ -2421,6 +2585,9 @@ class DebrisFlowDialog(QDialog):
             if "V_max"   in out: self.chk_V_max.setChecked(out["V_max"])
             if "h_final" in out: self.chk_h_final.setChecked(out["h_final"])
             if "t_arrival" in out: self.chk_t_arrival.setChecked(out["t_arrival"])
+            if "z_change" in out: self.chk_z_change.setChecked(out["z_change"])
+            if "Cv_final" in out: self.chk_cv_final.setChecked(out["Cv_final"])
+            if "lambda_final" in out: self.chk_lambda.setChecked(out["lambda_final"])
             thr_on  = out.get("threshold_enabled", False)
             thr_val = out.get("threshold_value", 0.10)
             self.chk_threshold.setChecked(thr_on)
@@ -2658,6 +2825,9 @@ class DebrisFlowDialog(QDialog):
         if self.chk_V_max.isChecked():    wanted.add("V_max")
         if self.chk_h_final.isChecked():  wanted.add("h_final")
         if self.chk_t_arrival.isChecked(): wanted.add("t_arrival")
+        if self.chk_z_change.isChecked(): wanted.add("z_change")
+        if self.chk_cv_final.isChecked(): wanted.add("Cv_final")
+        if self.chk_lambda.isChecked():   wanted.add("lambda_final")
 
         if not wanted:
             QMessageBox.warning(
@@ -2718,6 +2888,15 @@ class DebrisFlowDialog(QDialog):
             "cfl_number":       self.spin_cfl.value(),
             "t_end":            float(self.spin_tend.value()),
             "dt_max":           self.spin_dtmax.value(),
+            "slope_correction": self.chk_slope.isChecked(),
+            "eight_connectivity": self.chk_8conn.isChecked(),
+            "entrainment":      self.chk_entrain.isChecked(),
+            "entrain_coef":     self.spin_Ke.value(),
+            "bed_friction_angle_deg": self.spin_phi.value(),
+            "Cv_bed":           self.spin_Cvbed.value(),
+            "two_phase":        self.chk_2phase.isChecked(),
+            "pore_pressure_lambda0":   self.spin_lam0.value(),
+            "pore_consolidation_time": self.spin_Tc.value(),
             "h_threshold":      (self.spin_threshold.value()
                                  if self.chk_threshold.isChecked() else 0.0),
         }
@@ -2762,11 +2941,14 @@ class DebrisFlowDialog(QDialog):
             "V_max":     "Peak velocity",
             "h_final":   "Final deposits",
             "t_arrival": "Arrival time",
+            "z_change":  "Bed change",
+            "Cv_final":  "Final Cv",
+            "lambda_final": "Pore-pressure λ",
         }
 
         from .plugin import DebrisFlowPlugin
         lines = []
-        for key in ("h_max", "V_max", "h_final", "t_arrival"):
+        for key in ("h_max", "V_max", "h_final", "t_arrival", "z_change", "Cv_final", "lambda_final"):
             if key not in wanted:
                 continue
             name = f"{prefix}_{key}"

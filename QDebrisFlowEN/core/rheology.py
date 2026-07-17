@@ -56,6 +56,15 @@ class OBrienParameters:
 
     h_min: float = 0.005  # minimum depth of a wet cell [m]
 
+    # ── Entrainment (Phase 2 — bed erosion / deposition) ─────────────────────
+    entrain_coef:           float = 0.1    # K_e erodibility coefficient (Egashira)
+    bed_friction_angle_deg: float = 37.0   # φ for the equilibrium concentration
+    Cv_bed:                 float = 0.0     # bed packing concentration (0 → Cv_max)
+
+    # ── Two-phase / pore pressure (Phase 4 — Iverson) ────────────────────────
+    pore_pressure_lambda0:   float = 0.0   # initial/inflow basal pore-pressure ratio λ0 ∈ [0,1)
+    pore_consolidation_time: float = 600.0 # consolidation (drainage) timescale T_c [s]
+
     # ── Derived ────────────────────────────────────────────────────────────────
     rho_mixture:   float = field(init=False)
     gamma_mixture: float = field(init=False)
@@ -84,6 +93,13 @@ class OBrienParameters:
             self.tau_yield = self.alpha1 * np.exp(self.beta1 * self.Cv)
             self.eta       = self.alpha2 * np.exp(self.beta2 * self.Cv)
 
+        if self.Cv_bed <= 0.0:
+            self.Cv_bed = self.Cv_max
+        if not (0.0 <= self.pore_pressure_lambda0 < 1.0):
+            raise ValueError("pore_pressure_lambda0 must be in [0, 1)")
+        if self.pore_consolidation_time <= 0.0:
+            raise ValueError("pore_consolidation_time must be > 0")
+
     @property
     def mode_name(self) -> str:
         return "Direct input (HEC-RAS)" if self._direct_mode else "Exponential coeff."
@@ -104,3 +120,39 @@ class OBrienParameters:
             f"  n  = {self.manning_n:.3f}",
             f"  h_stop (10%) = {self.h_stop(0.10):.4f} m",
         ])
+
+    # ── Phase 2: per-cell field versions of the kernel constants ─────────────
+    def kernel_fields(self, Cv):
+        """
+        Per-cell kernel constants (tau_gm = τy/γm, K_eta_8gm = K·η/(8·γm)) for a
+        Cv field, using the same closure as the scalar case. A uniform Cv equal
+        to self.Cv reproduces the scalar self.tau_yield/γm and self.K_visc·η/(8γ)
+        exactly, so entrainment OFF is bit-for-bit the planar baseline.
+
+        γm always varies with Cv (mixture density); τy and η additionally vary in
+        exponential mode (Mode 2) — that is the auto-stiffening entrainment loop.
+        """
+        Cv = np.asarray(Cv, dtype=np.float64)
+        if self._direct_mode:
+            tau = np.full_like(Cv, self.tau_yield)
+            eta = np.full_like(Cv, self.eta)
+        else:
+            tau = self.alpha1 * np.exp(self.beta1 * Cv)
+            eta = self.alpha2 * np.exp(self.beta2 * Cv)
+        gamma = (self.rho_sediment * Cv + self.rho_water * (1.0 - Cv)) * GRAVITY
+        tau_gm    = tau / gamma
+        K_eta_8gm = self.K_visc * eta / (8.0 * gamma)
+        return np.ascontiguousarray(tau_gm), np.ascontiguousarray(K_eta_8gm)
+
+    def equilibrium_cv(self, tan_theta):
+        """
+        Takahashi (1991) equilibrium volumetric concentration for the local bed
+        slope, clamped to (0, Cv_max].  Cv_eq = ρw·tanθ / [(ρs−ρw)·(tanφ−tanθ)].
+        For tanθ ≥ tanφ (unbounded erosion) it returns Cv_max.
+        """
+        tan_theta = np.asarray(tan_theta, dtype=np.float64)
+        tphi = np.tan(np.radians(self.bed_friction_angle_deg))
+        den  = (self.rho_sediment - self.rho_water) * (tphi - tan_theta)
+        num  = self.rho_water * tan_theta
+        eq   = np.where(den > 1e-6, num / np.maximum(den, 1e-6), self.Cv_max)
+        return np.clip(eq, 0.0, self.Cv_max)
