@@ -92,6 +92,13 @@ class DebrisFlowPlugin:
                     QgsColorRampShader.ColorRampItem(vmin + (vmax - vmin) * 0.66, QColor(255, 80, 0), ""),
                     QgsColorRampShader.ColorRampItem(vmax, QColor(120, 0, 60), f"{vmax:.2f} m³/s²"),
                 ]
+            elif style == "froude":
+                items = [
+                    QgsColorRampShader.ColorRampItem(vmin, QColor(230, 240, 255), f"Fr {vmin:.2f}"),
+                    QgsColorRampShader.ColorRampItem(min(max(0.5, vmin), vmax), QColor(120, 170, 230), "Fr 0.5"),
+                    QgsColorRampShader.ColorRampItem(min(max(1.0, vmin), vmax), QColor(255, 160, 0), "Fr 1"),
+                    QgsColorRampShader.ColorRampItem(vmax, QColor(170, 0, 0), f"Fr {vmax:.2f}"),
+                ]
             else:  # arrival time
                 items = [
                     QgsColorRampShader.ColorRampItem(vmin, QColor(255, 255, 0), f"{vmin:.0f}s"),
