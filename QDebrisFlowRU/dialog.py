@@ -1175,6 +1175,8 @@ class DebrisFlowDialog(QDialog):
         self.worker = None
         # Хранилище гидрографов: {feature_id (int): dict}
         self._hydro_data     = {}
+        # id линейного слоя, к которому относятся гидрографы (fid уникален лишь в слое)
+        self._hydro_layer_id = None
         self.sweep_worker    = None
         self._sweep_results  = []
         self._sweep_best_pkg = None
@@ -2698,6 +2700,9 @@ class DebrisFlowDialog(QDialog):
         # --- Гидрографы ---
         hydro_sec = data.get("hydrographs", {})
         self._hydro_data = {}
+        _src = self.src_line_combo.currentLayer()
+        self._hydro_layer_id = _src.id() if (src_name and _src is not None
+                                             and _src.name() == src_name) else None
         for fid_str, hdata in hydro_sec.items():
             try:
                 self._hydro_data[int(fid_str)] = hdata
@@ -2819,6 +2824,11 @@ class DebrisFlowDialog(QDialog):
                                 "Слой должен быть линейным (LineString).")
             return
 
+        # гидрографы хранятся по fid, а он уникален только внутри слоя:
+        # другой слой не должен их унаследовать
+        if layer.id() != self._hydro_layer_id:
+            self._hydro_data = {}
+            self._hydro_layer_id = layer.id()
         feats = list(layer.getFeatures())
         if not feats:
             QMessageBox.warning(self, "Пусто",
