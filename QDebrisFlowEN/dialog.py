@@ -1199,22 +1199,37 @@ class DebrisFlowDialog(QDialog):
             "For field conditions use Mode 1.")
         warn.setStyleSheet("color:#B26A00;font-size:10px")
         fl_e.addRow(warn)
+        info = QLabel(
+            "τy = α₁·exp(β₁·Cv),  η = α₂·exp(β₂·Cv)  (this plugin).\n"
+            "In FLO-2D and O'Brien & Julien (1988) the indices are the other way\n"
+            "round: η = α₁·exp(β₁·Cv), τy = α₂·exp(β₂·Cv) — do not copy α₁/β₁ blindly.\n"
+            "The FLO-2D coefficient table has only the footnote \"1 Pa = 10 dynes/cm²;\n"
+            "1 Pa·s = 10 poises\": if your α are in dynes/cm² and poises, multiply by 0.1.\n"
+            "Default values: source not established; at Cv = 0.40 they give\n"
+            "τy ≈ 0.8 Pa and η ≈ 26 Pa·s.")
+        info.setWordWrap(True)
+        info.setStyleSheet("color:#555;font-size:10px")
+        fl_e.addRow(info)
         self.spin_a1 = QDoubleSpinBox()
         self.spin_a1.setRange(0.0001,10); self.spin_a1.setValue(0.00423)
         self.spin_a1.setDecimals(5); self.spin_a1.setSingleStep(0.0001)
-        fl_e.addRow("α₁ [Pa]:", self.spin_a1)
+        self.spin_a1.setToolTip("Yield stress coefficient: τy = α₁·exp(β₁·Cv) [Pa]")
+        fl_e.addRow("α₁ (τy) [Pa]:", self.spin_a1)
         self.spin_b1 = QDoubleSpinBox()
         self.spin_b1.setRange(1,30); self.spin_b1.setValue(13.11)
         self.spin_b1.setDecimals(2)
-        fl_e.addRow("β₁ [-]:", self.spin_b1)
+        self.spin_b1.setToolTip("Yield stress exponent β₁ (dimensionless)")
+        fl_e.addRow("β₁ (τy) [-]:", self.spin_b1)
         self.spin_a2 = QDoubleSpinBox()
         self.spin_a2.setRange(0.001,10); self.spin_a2.setValue(0.0311)
         self.spin_a2.setDecimals(4); self.spin_a2.setSingleStep(0.001)
-        fl_e.addRow("α₂ [Pa·s]:", self.spin_a2)
+        self.spin_a2.setToolTip("Viscosity coefficient: η = α₂·exp(β₂·Cv) [Pa·s]")
+        fl_e.addRow("α₂ (η) [Pa·s]:", self.spin_a2)
         self.spin_b2 = QDoubleSpinBox()
         self.spin_b2.setRange(1,40); self.spin_b2.setValue(16.81)
         self.spin_b2.setDecimals(2)
-        fl_e.addRow("β₂ [-]:", self.spin_b2)
+        self.spin_b2.setToolTip("Viscosity exponent β₂ (dimensionless)")
+        fl_e.addRow("β₂ (η) [-]:", self.spin_b2)
         layout.addWidget(self._sec_exp)
 
         # Manning + K
