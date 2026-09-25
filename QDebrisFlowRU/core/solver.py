@@ -169,56 +169,92 @@ if _NUMBA_AVAILABLE:
         nxm, nym = nx - 1, ny - 1
 
         # X-грани
-        Qx_new = np.empty_like(Qx)
+        # Пробный поток F (инерция + давление) и полунеявный знаменатель d.
+        # Маннинг (квадр.) и вязкость (лин.) — полунеявно (Bates 2010) со СВЯЗАННЫМ
+        # трением: |q| включает поперечную компоненту, осреднённую по четырём соседним
+        # граням (Cozzolino et al. 2021, ур. 19-21; de Almeida & Bates 2013)
+        Fx = np.zeros_like(Qx); Dx = np.zeros_like(Qx)
         for i in range(ny):
             for j in range(nxm):
                 if not (mask[i, j] and mask[i, j+1]):
-                    Qx_new[i, j] = 0.0; continue
+                    continue
                 eL = z[i, j]   + h[i, j]
                 eR = z[i, j+1] + h[i, j+1]
                 hf = (eL if eL > eR else eR) - (z[i,j] if z[i,j] > z[i,j+1] else z[i,j+1])
                 if hf != hf or hf <= h_min:
-                    Qx_new[i, j] = 0.0; continue
+                    continue
                 hf = min(hf, 0.5*(h[i, j] + h[i, j+1]))   # лимитер Almeida et al. (2012), ур. 2
                 if hf <= h_min:
-                    Qx_new[i, j] = 0.0; continue
+                    continue
                 q  = Qx[i, j]
-                vm = (q if q >= 0. else -q) / hf
-                # Маннинг (квадр.) и вязкость (лин.) — полунеявно в знаменатель (Bates 2010)
+                qt = 0.
+                if i > 0:   qt += Qy[i-1, j] + Qy[i-1, j+1]
+                if i < nym: qt += Qy[i, j]   + Qy[i, j+1]
+                qt *= 0.25
+                vm = (q*q + qt*qt)**0.5 / hf
                 sf = n2 * vm / hf**(4./3.) + K_eta_8gm / hf**2
                 d  = 1. + G * dt * sf
                 if d < 1.: d = 1.
-                # τy/(γm·h) из Sf FLO-2D: импульс текучести g·Δt·τy/γm [м²/с] вычитается
-                # в числителе, ДО деления на d, — тогда движение начинается при
-                # hf·|S| > τy/γm (= h_stop, см. rheology.h_stop) независимо от Δt, η, K
-                F  = q - G * hf * dt * (eR - eL) / dx
-                yi = G * dt * tau_gm
-                aF = F if F >= 0. else -F
-                Qx_new[i, j] = 0. if aF <= yi else (F - (yi if F >= 0. else -yi)) / d
+                Fx[i, j] = q - G * hf * dt * (eR - eL) / dx
+                Dx[i, j] = d
 
         # Y-грани
-        Qy_new = np.empty_like(Qy)
+        Fy = np.zeros_like(Qy); Dy = np.zeros_like(Qy)
         for i in range(nym):
             for j in range(nx):
                 if not (mask[i, j] and mask[i+1, j]):
-                    Qy_new[i, j] = 0.0; continue
+                    continue
                 eU = z[i, j]   + h[i, j]
                 eD = z[i+1, j] + h[i+1, j]
                 hf = (eU if eU > eD else eD) - (z[i,j] if z[i,j] > z[i+1,j] else z[i+1,j])
                 if hf != hf or hf <= h_min:
-                    Qy_new[i, j] = 0.0; continue
+                    continue
                 hf = min(hf, 0.5*(h[i, j] + h[i+1, j]))
                 if hf <= h_min:
-                    Qy_new[i, j] = 0.0; continue
+                    continue
                 q  = Qy[i, j]
-                vm = (q if q >= 0. else -q) / hf
+                qt = 0.
+                if j > 0:   qt += Qx[i, j-1] + Qx[i+1, j-1]
+                if j < nxm: qt += Qx[i, j]   + Qx[i+1, j]
+                qt *= 0.25
+                vm = (q*q + qt*qt)**0.5 / hf
                 sf = n2 * vm / hf**(4./3.) + K_eta_8gm / hf**2
                 d  = 1. + G * dt * sf
                 if d < 1.: d = 1.
-                F  = q - G * hf * dt * (eD - eU) / dy
-                yi = G * dt * tau_gm
-                aF = F if F >= 0. else -F
-                Qy_new[i, j] = 0. if aF <= yi else (F - (yi if F >= 0. else -yi)) / d
+                Fy[i, j] = q - G * hf * dt * (eD - eU) / dy
+                Dy[i, j] = d
+
+        # Предел текучести τy/(γm·h) из Sf FLO-2D действует против ВЕКТОРА пробного потока
+        # (изотропно): покой при |F| ≤ g·Δt·τy/γm, иначе |F| уменьшается на этот импульс
+        # ДО деления на d → движение начинается при hf·|∇η| > τy/γm (= rheology.h_stop)
+        # при любом направлении потока, Δt, η и K
+        yi = G * dt * tau_gm
+        Qx_new = np.zeros_like(Qx)
+        for i in range(ny):
+            for j in range(nxm):
+                d = Dx[i, j]
+                if d <= 0.: continue
+                F  = Fx[i, j]
+                ft = 0.
+                if i > 0:   ft += Fy[i-1, j] + Fy[i-1, j+1]
+                if i < nym: ft += Fy[i, j]   + Fy[i, j+1]
+                ft *= 0.25
+                aF = (F*F + ft*ft)**0.5
+                if aF > yi:
+                    Qx_new[i, j] = F * (1. - yi / aF) / d
+        Qy_new = np.zeros_like(Qy)
+        for i in range(nym):
+            for j in range(nx):
+                d = Dy[i, j]
+                if d <= 0.: continue
+                F  = Fy[i, j]
+                ft = 0.
+                if j > 0:   ft += Fx[i, j-1] + Fx[i+1, j-1]
+                if j < nxm: ft += Fx[i, j]   + Fx[i+1, j]
+                ft *= 0.25
+                aF = (F*F + ft*ft)**0.5
+                if aF > yi:
+                    Qy_new[i, j] = F * (1. - yi / aF) / d
 
         # Ограничитель оттока — двухпроходная схема (идентична NumPy-бэкенду)
         # Проход 1: коэффициент sc для каждой ячейки
@@ -309,6 +345,16 @@ if _NUMBA_AVAILABLE:
 else:
     # ── NumPy fallback ────────────────────────────────────────────────────────
 
+    def _avg4_y_to_x(A):
+        """Среднее четырёх значений на y-гранях вокруг каждой x-грани (нет грани = 0)."""
+        P = np.zeros((A.shape[0] + 2, A.shape[1])); P[1:-1, :] = A
+        return 0.25 * (P[:-1, :-1] + P[:-1, 1:] + P[1:, :-1] + P[1:, 1:])
+
+    def _avg4_x_to_y(A):
+        """Среднее четырёх значений на x-гранях вокруг каждой y-грани (нет грани = 0)."""
+        P = np.zeros((A.shape[0], A.shape[1] + 2)); P[:, 1:-1] = A
+        return 0.25 * (P[:-1, :-1] + P[:-1, 1:] + P[1:, :-1] + P[1:, 1:])
+
     def _lia_step(h, Qx, Qy, z, mask, dx, dy, dt, h_min, n2, K_eta_8gm, tau_gm):
         G  = 9.81
         mv = mask
@@ -321,16 +367,6 @@ else:
             nan=0., posinf=0.), 0.)
         hf_x = np.minimum(hf_x, 0.5*(h[:,:-1]+h[:,1:]))           # лимитер Almeida et al. (2012)
         wet_x = (hf_x > h_min) & mv[:, :-1] & mv[:, 1:]
-        vm_x  = np.abs(Qx) / np.maximum(hf_x, 1e-12)
-        sf_x  = (n2 * vm_x / np.maximum(hf_x,1e-12)**(4./3.)
-                 + K_eta_8gm / np.maximum(hf_x,1e-12)**2)
-        denom_x = np.maximum(1. + G*dt*sf_x, 1.)
-        F_x = np.where(wet_x, Qx - G*hf_x*dt*np.nan_to_num((eR-eL)/dx), 0.)
-        # τy — импульс текучести вычитается в числителе до деления на denom
-        # (старт при hf·|S| > τy/γm независимо от Δt); без инверсии знака
-        yield_impulse = G * dt * tau_gm
-        Qx_new = np.where(np.abs(F_x) > yield_impulse,
-                          (F_x - yield_impulse * np.sign(F_x)) / denom_x, 0.)
 
         # Y-грани
         eU, eD = eta[:-1, :], eta[1:, :]
@@ -339,13 +375,28 @@ else:
             nan=0., posinf=0.), 0.)
         hf_y = np.minimum(hf_y, 0.5*(h[:-1,:]+h[1:,:]))
         wet_y = (hf_y > h_min) & mv[:-1,:] & mv[1:,:]
-        vm_y  = np.abs(Qy) / np.maximum(hf_y, 1e-12)
-        sf_y  = (n2 * vm_y / np.maximum(hf_y,1e-12)**(4./3.)
-                 + K_eta_8gm / np.maximum(hf_y,1e-12)**2)
+
+        # Связанное трение (Cozzolino et al. 2021, ур. 19-21): |q| включает поперечную
+        # компоненту, осреднённую по четырём соседним граням
+        hfx = np.maximum(hf_x, 1e-12); hfy = np.maximum(hf_y, 1e-12)
+        sf_x = (n2 * np.sqrt(Qx**2 + _avg4_y_to_x(Qy)**2) / hfx / hfx**(4./3.)
+                + K_eta_8gm / hfx**2)
+        sf_y = (n2 * np.sqrt(Qy**2 + _avg4_x_to_y(Qx)**2) / hfy / hfy**(4./3.)
+                + K_eta_8gm / hfy**2)
+        denom_x = np.maximum(1. + G*dt*sf_x, 1.)
         denom_y = np.maximum(1. + G*dt*sf_y, 1.)
+        F_x = np.where(wet_x, Qx - G*hf_x*dt*np.nan_to_num((eR-eL)/dx), 0.)
         F_y = np.where(wet_y, Qy - G*hf_y*dt*np.nan_to_num((eD-eU)/dy), 0.)
-        Qy_new = np.where(np.abs(F_y) > yield_impulse,
-                          (F_y - yield_impulse * np.sign(F_y)) / denom_y, 0.)
+
+        # τy действует против ВЕКТОРА пробного потока (изотропно): покой при |F| ≤ g·Δt·τy/γm,
+        # иначе |F| уменьшается на импульс текучести до деления на знаменатель
+        yield_impulse = G * dt * tau_gm
+        Fm_x = np.sqrt(F_x**2 + _avg4_y_to_x(F_y)**2)
+        Fm_y = np.sqrt(F_y**2 + _avg4_x_to_y(F_x)**2)
+        Qx_new = np.where(wet_x & (Fm_x > yield_impulse),
+                          F_x * (1. - yield_impulse / np.maximum(Fm_x, 1e-300)) / denom_x, 0.)
+        Qy_new = np.where(wet_y & (Fm_y > yield_impulse),
+                          F_y * (1. - yield_impulse / np.maximum(Fm_y, 1e-300)) / denom_y, 0.)
 
         # Ограничитель оттока
         ox = np.zeros_like(h)
