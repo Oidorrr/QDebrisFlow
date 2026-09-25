@@ -99,6 +99,52 @@ def _volume_residuals(log_v, cm) -> np.ndarray:
     return cm - A @ coef + cm.mean()
 
 
+
+def _plugin_version() -> str:
+    """Plugin version from metadata.txt (for run records)."""
+    import configparser
+    cp = configparser.ConfigParser()
+    try:
+        cp.read(os.path.join(os.path.dirname(os.path.abspath(__file__)), "metadata.txt"),
+                encoding="utf-8")
+        return cp.get("general", "version", fallback="?")
+    except Exception:
+        return "?"
+
+
+def _runtime_info() -> dict:
+    """Versions of the libraries that determine the numerics (for run records)."""
+    info = {"plugin_version": _plugin_version(), "numpy": np.__version__}
+    try:
+        import numba
+        info["numba"] = numba.__version__
+    except Exception:
+        info["numba"] = None
+    try:
+        from qgis.core import Qgis
+        info["qgis"] = Qgis.version()
+    except Exception:
+        pass
+    return info
+
+
+def _jsonable(obj):
+    """Parameters → JSON-safe (layers → name/source/CRS, numpy → lists, callables dropped)."""
+    if isinstance(obj, dict):
+        return {str(k): _jsonable(v) for k, v in obj.items() if not callable(v)}
+    if isinstance(obj, (list, tuple, set)):
+        return [_jsonable(v) for v in obj]
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    if isinstance(obj, (np.floating, np.integer, np.bool_)):
+        return obj.item()
+    if isinstance(obj, (str, int, float, bool)) or obj is None:
+        return obj
+    if hasattr(obj, "source") and hasattr(obj, "name") and hasattr(obj, "crs"):
+        return {"name": obj.name(), "source": obj.source(), "crs": obj.crs().authid()}
+    return str(obj)
+
+
 def _read_hydrograph_csv(path: str):
     """Reads (time [s], Q [m³/s]) from a CSV/text file: delimiter ',', ';', tab or spaces;
     a decimal comma is accepted with ';', tab or space delimiters; a header line is skipped."""
@@ -562,6 +608,34 @@ class SimulationWorker(QThread):
                     "  cells emptied in one step); V_max and h·v² there are not reliable.\n"
                     "  Try θ-weighting 0.8–0.9 on the Solver Settings tab.")
 
+            rec_path = os.path.join(out_dir, f"{prefix}_run.json")
+            from core import solver as _solver_mod
+            run_rec = dict(
+                created=time.strftime("%Y-%m-%d %H:%M:%S"),
+                runtime=dict(_runtime_info(), backend=(
+                    "Numba JIT" if _solver_mod._NUMBA_AVAILABLE else "NumPy")),
+                parameters=_jsonable(p),
+                rheology=dict(mode=obrien.mode_name, tau_yield_Pa=float(obrien.tau_yield),
+                              eta_Pas=float(obrien.eta), rho_mixture=float(obrien.rho_mixture),
+                              h_min=float(obrien.h_min)),
+                dem=dict(nx=int(geo_info["nx"]), ny=int(geo_info["ny"]), dx=float(geo_info["dx"]),
+                         dy=float(geo_info["dy"]), crs=p["dem_layer"].crs().authid(),
+                         source=p["dem_layer"].source()),
+                results=dict(n_steps=int(result.n_steps), t_simulated=float(result.t_simulated),
+                             inflow_vol_m3=float(result.total_inflow_vol),
+                             volume_balance=_jsonable(vb),
+                             h_max_peak_m=float(result.h_max.max()),
+                             V_max_peak_ms=float(result.V_max.max()),
+                             HV2_max_peak=float(result.HV2_max.max()),
+                             Fr_hv2_gt05_pct=fr05, Fr_hv2_gt1_pct=fr1,
+                             edge_h_max_m=float(result.edge_h_max),
+                             vcap_cells=int(result.n_vcap_cells)),
+                outputs=paths,
+            )
+            with open(rec_path, "w", encoding="utf-8") as f:
+                json.dump(run_rec, f, ensure_ascii=False, indent=2)
+            self.log_message.emit(f"  Run record (all parameters, versions, balance): {rec_path}")
+
             self.finished.emit({
                 "result":   result,
                 "paths":    paths,
@@ -686,6 +760,7 @@ class SweepWorker(QThread):
         from core import sweep_runner as _sr
         from core.solver import hydrograph_volume as _hydro_volume
 
+        _csv_f = None
         try:
             from qgis_runner import read_dem_array
 
@@ -812,6 +887,25 @@ class SweepWorker(QThread):
             ]
 
             # No check needed: threads do not require pickle
+            import csv as _csv
+            os.makedirs(p["out_dir"], exist_ok=True)
+            csv_path = os.path.join(p["out_dir"], p["csv_name"])
+            _csv_f = open(csv_path, "w", newline="", encoding="utf-8")
+            _csv_w = _csv.DictWriter(_csv_f, fieldnames=["run_id", "status", "vol_m3", "vol_in_m3", "tau_yield_Pa", "eta_Pas", "manning_n",
+                       "K_visc", "h_max_m", "edge_h_max_m", "vcap_cells", "wall_s", "TP", "FP",
+                       "FN", "omega_Tm", "delta_o_c", "delta_u", "Cm", "depth_bias_m", "eta_min"],
+                                     extrasaction="ignore", restval="")
+            _csv_w.writeheader(); _csv_f.flush()
+            from core import solver as _solver_mod
+            ctx = dict(created=time.strftime("%Y-%m-%d %H:%M:%S"),
+                       runtime=dict(_runtime_info(), backend=(
+                           "Numba JIT" if _solver_mod._NUMBA_AVAILABLE else "NumPy")),
+                       csv=csv_path, note="keys with prefix log_ are sampled uniformly in log10 and hold log10 values",
+                       base_volume_m3=base_vol, parameters=_jsonable(p))
+            with open(os.path.splitext(csv_path)[0] + "_context.json", "w",
+                      encoding="utf-8") as f:
+                json.dump(ctx, f, ensure_ascii=False, indent=2)
+            self.sweep_log.emit(f"Results are appended to {csv_path} after every run")
             t_start   = time.time()
             _best_Cm  = float("inf")
             _best_pkg = None
@@ -826,6 +920,7 @@ class SweepWorker(QThread):
                     (time.time() - t_start) / max(completed, 1)
                     * (n_runs - completed) / 60, 1)
                 row_data["eta_min"] = eta_min
+                _csv_w.writerow(row_data); _csv_f.flush()
 
                 self.run_done.emit(row_data)
 
@@ -920,6 +1015,9 @@ class SweepWorker(QThread):
         except Exception as e:
             self.sweep_error.emit(
                 f"{type(e).__name__}: {e}\n\n{traceback.format_exc()}")
+        finally:
+            if _csv_f is not None:
+                _csv_f.close()
 
     # ── Helper methods ────────────────────────────────────────────────────────
 
@@ -2002,6 +2100,7 @@ class DebrisFlowDialog(QDialog):
             "K_fixed":   self.spin_K_fixed.value(),
             # Analysis settings
             "n_runs":    self.spin_n_runs.value(),
+            "n_workers": self.spin_n_workers.value(),
             "seed":      self.spin_seed.value(),
             "out_dir":   self.edit_sweep_outdir.text(),
             "csv_name":  self.edit_sweep_csv.text(),
@@ -2080,6 +2179,7 @@ class DebrisFlowDialog(QDialog):
                 self.spin_K_fixed,   "K_vary","K_min","K_max","K_fixed")
 
         if "n_runs"  in d: self.spin_n_runs.setValue(int(d["n_runs"]))
+        if "n_workers" in d: self.spin_n_workers.setValue(int(d["n_workers"]))
         if "seed"    in d: self.spin_seed.setValue(int(d["seed"]))
         if "out_dir" in d: self.edit_sweep_outdir.setText(d["out_dir"])
         if "csv_name" in d: self.edit_sweep_csv.setText(d["csv_name"])
@@ -2339,23 +2439,12 @@ class DebrisFlowDialog(QDialog):
         csv_path = os.path.join(out_dir, csv_name)
         os.makedirs(out_dir, exist_ok=True)
 
-        # ── Writing CSV ────────────────────────────────────────────────────────
-        import csv as _csv
-        ok_rows = [r for r in self._sweep_results if r.get("status") == "ok"]
-        if ok_rows:
-            fieldnames = list(ok_rows[0].keys())
-            # Ensure all rows have the same keys
-            all_rows = []
-            for r in self._sweep_results:
-                row = {k: r.get(k, None) for k in fieldnames}
-                all_rows.append(row)
-            with open(csv_path, "w", newline="", encoding="utf-8") as f:
-                writer = _csv.DictWriter(f, fieldnames=fieldnames)
-                writer.writeheader()
-                writer.writerows(all_rows)
+        # CSV rows were written by the worker right after each run (nothing is lost on a crash)
+        if not os.path.isfile(csv_path):
+            csv_path = None
+        elif any(r.get("status") == "ok" for r in self._sweep_results):
             self.sweep_log_box.append(f"\n📋 CSV saved: {csv_path}")
         else:
-            csv_path = None
             self.sweep_log_box.append("\n⚠ No successful runs for CSV.")
 
         # ── h_max raster layer of the best run ───────────────────────────────
@@ -2434,7 +2523,7 @@ class DebrisFlowDialog(QDialog):
             "source_table": [ {fid, name, q_max}, ... ],
             "obrien": { Cv, Cv_max, direct_mode, tau_yield, eta,
                         alpha1, beta1, alpha2, beta2, manning_n },
-            "solver": { t_end, dt_max },
+            "solver": { t_end, dt_max, cfl_number, face_depth_limiter, theta },
             "output": { prefix, outdir,
                         h_max, V_max, HV2_max, Fr_hv2, h_final, t_arrival,
                         threshold_enabled, threshold_value }
@@ -2500,6 +2589,7 @@ class DebrisFlowDialog(QDialog):
         solver_sec = {
             "t_end":  self.spin_tend.value(),
             "dt_max": self.spin_dtmax.value(),
+            "cfl_number": self.spin_cfl.value(),
             "face_depth_limiter": self.chk_face_lim.isChecked(),
             "theta":  self.spin_theta.value(),
         }
@@ -2670,6 +2760,7 @@ class DebrisFlowDialog(QDialog):
         if sv:
             if "t_end"  in sv: self.spin_tend.setValue(int(sv["t_end"]))
             if "dt_max" in sv: self.spin_dtmax.setValue(sv["dt_max"])
+            if "cfl_number" in sv: self.spin_cfl.setValue(float(sv["cfl_number"]))
             if "face_depth_limiter" in sv:
                 self.chk_face_lim.setChecked(bool(sv["face_depth_limiter"]))
             if "theta" in sv: self.spin_theta.setValue(float(sv["theta"]))
