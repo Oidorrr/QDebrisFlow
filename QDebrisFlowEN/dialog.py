@@ -392,6 +392,7 @@ class SimulationWorker(QThread):
                 dt_max            = p["dt_max"],
                 cfl_number        = p.get("cfl_number", 0.60),
                 face_depth_limiter = p.get("face_depth_limiter", True),
+                theta             = p.get("theta", 1.0),
                 progress_callback = lambda tc, te: (
                     self.progress.emit(tc, te),
                     self.log_message.emit(f"  t = {tc:.0f} s / {te:.0f} s")
@@ -688,6 +689,7 @@ class SweepWorker(QThread):
                 dt_max          = p["dt_max"],
                 cfl_number      = p.get("cfl_number", 0.60),
                 face_depth_limiter = p.get("face_depth_limiter", True),
+                theta           = p.get("theta", 1.0),
                 depth_threshold = p["depth_threshold"],
             )
 
@@ -1343,6 +1345,18 @@ class DebrisFlowDialog(QDialog):
             "The source of this formula is unconfirmed (it was attributed to\n"
             "Almeida et al. 2012, eq. 2). ON by default — as in the published runs.")
         layout.addRow(self.chk_face_lim)
+
+        self.spin_theta = QDoubleSpinBox()
+        self.spin_theta.setRange(0.50, 1.00); self.spin_theta.setValue(1.00)
+        self.spin_theta.setDecimals(2); self.spin_theta.setSingleStep(0.05)
+        self.spin_theta.setToolTip(
+            "θ-weighting of the discharge (de Almeida et al. 2012):\n"
+            "q* = θ·q + (1−θ)/2·(q_prev + q_next).\n"
+            "Damps numerical oscillations of the LIA scheme in steep channels\n"
+            "with low friction (velocities stuck at the 30 m/s cap are a symptom).\n\n"
+            "1.00 — original Bates et al. (2010) scheme, as in the published runs.\n"
+            "0.80 — Landlab default; 0.7–0.9 is the usual range.")
+        layout.addRow("θ-weighting:", self.spin_theta)
 
         lbl = QLabel(
             "<i>h_min = 5 mm is fixed automatically for LIA stability.</i>")
@@ -2113,6 +2127,7 @@ class DebrisFlowDialog(QDialog):
                                or "sweep_results.csv"),
             cfl_number      = self.spin_cfl.value(),
             face_depth_limiter = self.chk_face_lim.isChecked(),
+            theta           = self.spin_theta.value(),
             n_workers       = self.spin_n_workers.value(),
             rho_s           = self.spin_rho_s.value(),
             rho_w           = self.spin_rho_w.value(),
@@ -2350,6 +2365,7 @@ class DebrisFlowDialog(QDialog):
             "t_end":  self.spin_tend.value(),
             "dt_max": self.spin_dtmax.value(),
             "face_depth_limiter": self.chk_face_lim.isChecked(),
+            "theta":  self.spin_theta.value(),
         }
 
         # --- Output ---
@@ -2519,6 +2535,7 @@ class DebrisFlowDialog(QDialog):
             if "dt_max" in sv: self.spin_dtmax.setValue(sv["dt_max"])
             if "face_depth_limiter" in sv:
                 self.chk_face_lim.setChecked(bool(sv["face_depth_limiter"]))
+            if "theta" in sv: self.spin_theta.setValue(float(sv["theta"]))
 
         # --- Output ---
         out = data.get("output", {})
@@ -2829,6 +2846,7 @@ class DebrisFlowDialog(QDialog):
             "K_visc":           self.spin_K.value(),
             "cfl_number":       self.spin_cfl.value(),
             "face_depth_limiter": self.chk_face_lim.isChecked(),
+            "theta":            self.spin_theta.value(),
             "t_end":            float(self.spin_tend.value()),
             "dt_max":           self.spin_dtmax.value(),
             "h_threshold":      (self.spin_threshold.value()

@@ -204,6 +204,7 @@ def run_one_sample(args: dict) -> dict:
             dt_max     = args["dt_max"],
             cfl_number = args["cfl_number"],
             face_depth_limiter = args.get("face_depth_limiter", True),
+            theta      = args.get("theta", 1.0),
         )
 
         result = DebrisFlowSolver2D(
