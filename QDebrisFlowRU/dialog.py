@@ -464,6 +464,12 @@ class SimulationWorker(QThread):
                     "  Граница — непроницаемая стенка: жидкость накапливается у неё, а не\n"
                     "  уходит, поэтому h_max/h_final у края завышены.\n"
                     "  Расширьте ЦМР за пределы ожидаемой зоны выноса.")
+            if result.n_vcap_cells:
+                self.log_message.emit(
+                    f"\n⚠ Скорость упёрлась в предел 30 м/с в {result.n_vcap_cells} ячейках.\n"
+                    "  Это численный артефакт (колебания LIA в крутом русле или ячейки,\n"
+                    "  опустошённые за один шаг); V_max и h·v² там ненадёжны.\n"
+                    "  Попробуйте θ-взвешивание 0.8–0.9 на вкладке «Настройки решателя».")
 
             self.finished.emit({
                 "result":   result,
@@ -794,7 +800,7 @@ class SweepWorker(QThread):
                                 h_max=None,
                                 **{k: None for k in [
                                     "vol_m3","vol_in_m3","tau_yield_Pa","eta_Pas","manning_n",
-                                    "K_visc","h_max_m","edge_h_max_m","wall_s","eta_min",
+                                    "K_visc","h_max_m","edge_h_max_m","vcap_cells","wall_s","eta_min",
                                     "TP","FP","FN","omega_Tm",
                                     "delta_o_c","delta_u","Cm","depth_bias_m"]},
                             )

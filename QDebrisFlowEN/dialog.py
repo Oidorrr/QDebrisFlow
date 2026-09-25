@@ -464,6 +464,12 @@ class SimulationWorker(QThread):
                     "  The boundary is a closed wall: the fluid accumulates there instead of\n"
                     "  leaving, so h_max/h_final near the edge are overestimated.\n"
                     "  Enlarge the DEM beyond the expected runout.")
+            if result.n_vcap_cells:
+                self.log_message.emit(
+                    f"\n⚠ The velocity reached the 30 m/s cap in {result.n_vcap_cells} cells.\n"
+                    "  This is a numerical artefact (LIA oscillations in steep channels or\n"
+                    "  cells emptied in one step); V_max and h·v² there are not reliable.\n"
+                    "  Try θ-weighting 0.8–0.9 on the Solver Settings tab.")
 
             self.finished.emit({
                 "result":   result,
@@ -794,7 +800,7 @@ class SweepWorker(QThread):
                                 h_max=None,
                                 **{k: None for k in [
                                     "vol_m3","vol_in_m3","tau_yield_Pa","eta_Pas","manning_n",
-                                    "K_visc","h_max_m","edge_h_max_m","wall_s","eta_min",
+                                    "K_visc","h_max_m","edge_h_max_m","vcap_cells","wall_s","eta_min",
                                     "TP","FP","FN","omega_Tm",
                                     "delta_o_c","delta_u","Cm","depth_bias_m"]},
                             )
