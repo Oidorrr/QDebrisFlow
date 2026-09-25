@@ -506,6 +506,7 @@ class SimulationWorker(QThread):
                 rho_sediment     = p.get("rho_s", 2650.0),
                 rho_water        = p.get("rho_w", 1000.0),
                 tau_yield_direct = p.get("tau_yield_direct", 0.0),
+                direct_mode      = p.get("direct_mode"),
                 eta_direct       = p.get("eta_direct",       0.0),
                 alpha1           = p["alpha1"],
                 beta1            = p["beta1"],
@@ -1406,18 +1407,20 @@ class DebrisFlowDialog(QDialog):
             "QGroupBox::title{color:#1565C0}")
         fl_d = QFormLayout(self._sec_direct)
         self.spin_tau = QDoubleSpinBox()
-        self.spin_tau.setRange(0.01, 50000); self.spin_tau.setValue(600)
+        self.spin_tau.setRange(0.0, 50000); self.spin_tau.setValue(600)
         self.spin_tau.setDecimals(2); self.spin_tau.setSuffix(" Па")
         self.spin_tau.setSingleStep(50)
         self.spin_tau.setToolTip(
             "Предел текучести [Па] "
-            "Постпожарный сель: 200–800 Па.")
+            "Постпожарный сель: 200–800 Па. 0 — без предела текучести (чисто вязкая смесь).")
         fl_d.addRow("τy — Предел текучести:", self.spin_tau)
         self._lbl_hstop = QLabel()
         self._lbl_hstop.setStyleSheet("color:#555;font-size:10px;padding-left:4px")
         fl_d.addRow("", self._lbl_hstop)
         self.spin_tau.valueChanged.connect(self._update_hstop)
         self.spin_Cv.valueChanged.connect(self._update_hstop)
+        self.spin_rho_s.valueChanged.connect(self._update_hstop)
+        self.spin_rho_w.valueChanged.connect(self._update_hstop)
         self.spin_eta = QDoubleSpinBox()
         self.spin_eta.setRange(0.001, 10000); self.spin_eta.setValue(10.0)
         self.spin_eta.setDecimals(3); self.spin_eta.setSuffix(" Па·с")
@@ -1518,6 +1521,11 @@ class DebrisFlowDialog(QDialog):
         self.spin_tend = QSpinBox()
         self.spin_tend.setRange(60, 86400); self.spin_tend.setValue(3600)
         self.spin_tend.valueChanged.connect(lambda _v: self._refresh_volumes())
+        self.spin_tend.setToolTip(
+            "Моделируемое время [с] от начала гидрографов.\n"
+            "Должно покрывать гидрограф (столбец «V до t_end» на вкладке слоёв\n"
+            "показывает, сколько будет введено) и время остановки потока.\n"
+            "Расчёт заканчивается раньше, если поток полностью остановился.")
         self.spin_tend.setSuffix(" с")
         layout.addRow("Длительность симуляции:", self.spin_tend)
 
@@ -1528,15 +1536,15 @@ class DebrisFlowDialog(QDialog):
             "Максимальный внутренний шаг по времени [с].\n"
             "Реальный шаг ≤ dt_max и дополнительно ограничен CFL.\n"
             "НЕ путать с интервалом обновления прогресс-бара (60 с).\n\n"
-            "Рекомендации:\n"
-            "  DEM 90 м → 30–60 с\n"
-            "  DEM 30 м → 10–30 с\n"
-            "  DEM 10 м →  3–10 с\n"
-            "  DEM  5 м →  1–5 с")
+            "Он важен, только пока домен сухой или очень мелкий: когда поток\n"
+            "установился, шаг CFL намного меньше (при h = 1 м и ячейке 5 м —\n"
+            "около 1 с). Первый шаг тоже проверяется по CFL с учётом глубины от\n"
+            "притока, поэтому большие dt_max не опасны, но и бесполезны:\n"
+            "для любой сетки хватает 1–5 с.")
         layout.addRow("Макс. шаг dt_max:", self.spin_dtmax)
 
         self.spin_cfl = QDoubleSpinBox()
-        self.spin_cfl.setRange(0.10, 0.90); self.spin_cfl.setValue(0.60)
+        self.spin_cfl.setRange(0.10, 0.70); self.spin_cfl.setValue(0.60)
         self.spin_cfl.setDecimals(2); self.spin_cfl.setSingleStep(0.05)
         self.spin_cfl.setToolTip(
             "Число Куранта–Фридрихса–Леви (CFL).\n"
@@ -1544,8 +1552,8 @@ class DebrisFlowDialog(QDialog):
             "Рекомендуемые значения:\n"
             "  0.40–0.50 — консервативный (Bates et al. 2010)\n"
             "  0.60      — стандарт (по умолчанию)\n"
-            "  > 0.70    — только при плоском рельефе, с осторожностью.\n\n"
-            "При CFL > 0.9 возможна числовая неустойчивость.")
+            "Допустимый диапазон 0.10–0.70: Bates et al. (2010) рекомендуют\n"
+            "коэффициент около 0.2–0.7 (по пересказам в последующих работах).")
         layout.addRow("Число CFL:", self.spin_cfl)
 
         self.chk_face_lim = QCheckBox("Ограничитель глубины на грани  hf ≤ ½(hL+hR)")
@@ -2937,7 +2945,7 @@ class DebrisFlowDialog(QDialog):
         try:
             tau = self.spin_tau.value()
             Cv  = self.spin_Cv.value()
-            rho_m   = 2650. * Cv + 1000. * (1. - Cv)
+            rho_m   = self.spin_rho_s.value() * Cv + self.spin_rho_w.value() * (1. - Cv)
             gamma_m = rho_m * 9.81
             self._lbl_hstop.setText(
                 f"h_stop: {tau/(gamma_m*0.10):.3f} м (10%),  "

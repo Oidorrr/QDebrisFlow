@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import numpy as np
 from dataclasses import dataclass, field
+from typing import Optional
 
 RHO_WATER:    float = 1000.0
 RHO_SEDIMENT: float = 2650.0
@@ -63,6 +64,9 @@ class OBrienParameters:
     # K = 0 отключает вязкий член (в FLO-2D K = 0 означает «вычислить по n»).
 
     h_min: float = 0.005  # минимальная глубина мокрой ячейки [м]
+    # True → прямой ввод (τy может быть 0: чисто вязкая смесь), False → экспоненциальные
+    # коэффициенты, None → прежнее правило «прямой, если tau_yield_direct > 0» (для старого кода)
+    direct_mode: Optional[bool] = None
 
     # ── Производные ───────────────────────────────────────────────────────────
     rho_mixture:   float = field(init=False)
@@ -84,7 +88,11 @@ class OBrienParameters:
         self.rho_mixture   = self.rho_sediment * self.Cv + self.rho_water * (1.0 - self.Cv)
         self.gamma_mixture = self.rho_mixture * GRAVITY
 
-        self._direct_mode = self.tau_yield_direct > 0.0
+        # явный режим важнее; прежнее правило молча переключало τy = 0 на экспоненциальный режим
+        self._direct_mode = (self.tau_yield_direct > 0.0 if self.direct_mode is None
+                             else bool(self.direct_mode))
+        if self._direct_mode and self.eta_direct <= 0:
+            raise ValueError("В режиме прямого ввода необходимо задать eta_direct > 0")
         if self._direct_mode:
             self.tau_yield = self.tau_yield_direct
             self.eta       = self.eta_direct
