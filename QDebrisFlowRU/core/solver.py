@@ -74,7 +74,8 @@ class TerrainGrid:
 
     def __post_init__(self) -> None:
         self.ny, self.nx = self.dem.shape
-        self.mask_valid  = self.dem != self.nodata
+        # ячейки NaN/inf — тоже nodata (в float-растрах GDAL nodata часто задаётся как NaN)
+        self.mask_valid  = (self.dem != self.nodata) & np.isfinite(self.dem)
         # nodata → inf: поток не течёт туда (h_face ≤ 0)
         self._z = np.where(self.mask_valid, self.dem.astype(np.float64), np.inf)
 

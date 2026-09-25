@@ -7,6 +7,10 @@ from __future__ import annotations
 import numpy as np
 
 
+class RotatedRasterError(ValueError):
+    """The DEM geotransform has rotation/shear terms or a south-up row order."""
+
+
 def read_dem_array(layer) -> tuple[np.ndarray, dict]:
     try:
         from osgeo import gdal
@@ -18,6 +22,8 @@ def read_dem_array(layer) -> tuple[np.ndarray, dict]:
         nodata = band.GetNoDataValue()
         dem = band.ReadAsArray().astype(np.float64)
         gt = ds.GetGeoTransform()
+        if gt[2] != 0 or gt[4] != 0 or gt[5] > 0:
+            raise RotatedRasterError(f"ЦМР не ориентирована на север (геопреобразование {tuple(gt)}); перепроецируйте её в обычный растр.")
         nx, ny = ds.RasterXSize, ds.RasterYSize
         dx, dy = abs(gt[1]), abs(gt[5])
         xmin, ymax = gt[0], gt[3]
@@ -36,6 +42,8 @@ def read_dem_array(layer) -> tuple[np.ndarray, dict]:
         if nodata is not None:
             dem[dem == nodata] = nodata
         return dem, geo_info
+    except RotatedRasterError:
+        raise
     except Exception:
         return _read_dem_block(layer)
 

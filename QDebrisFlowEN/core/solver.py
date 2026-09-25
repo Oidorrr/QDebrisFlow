@@ -74,7 +74,8 @@ class TerrainGrid:
 
     def __post_init__(self) -> None:
         self.ny, self.nx = self.dem.shape
-        self.mask_valid  = self.dem != self.nodata
+        # NaN/inf cells are nodata too (GDAL float rasters often use NaN as nodata)
+        self.mask_valid  = (self.dem != self.nodata) & np.isfinite(self.dem)
         # nodata → inf: flow does not go there (h_face ≤ 0)
         self._z = np.where(self.mask_valid, self.dem.astype(np.float64), np.inf)
 
