@@ -68,6 +68,36 @@ def _lhs_samples(param_ranges: dict, n: int, seed: int = 42) -> list:
     return out
 
 
+def _spearman(x, y) -> float:
+    """Spearman rank correlation (no tie correction; LHS values are continuous)."""
+    x = np.asarray(x, float); y = np.asarray(y, float)
+    rx = np.argsort(np.argsort(x)).astype(float); ry = np.argsort(np.argsort(y)).astype(float)
+    rx -= rx.mean(); ry -= ry.mean()
+    d = np.sqrt(np.sum(rx * rx) * np.sum(ry * ry))
+    return float(np.sum(rx * ry) / d) if d > 0 else float("nan")
+
+
+def _spearman_ci(x, y, n_boot: int = 1000, seed: int = 0) -> tuple:
+    """95 % bootstrap interval of the Spearman correlation."""
+    x = np.asarray(x, float); y = np.asarray(y, float)
+    rng = np.random.default_rng(seed)
+    n = len(x)
+    vals = np.array([_spearman(x[i], y[i]) for i in
+                     (rng.integers(0, n, n) for _ in range(n_boot))])
+    vals = vals[np.isfinite(vals)]
+    if vals.size == 0:
+        return float("nan"), float("nan")
+    return float(np.percentile(vals, 2.5)), float(np.percentile(vals, 97.5))
+
+
+def _volume_residuals(log_v, cm) -> np.ndarray:
+    """Cm with the linear effect of log10(V) removed (mean Cm kept) — volume control."""
+    log_v = np.asarray(log_v, float); cm = np.asarray(cm, float)
+    A = np.vstack([log_v, np.ones_like(log_v)]).T
+    coef = np.linalg.lstsq(A, cm, rcond=None)[0]
+    return cm - A @ coef + cm.mean()
+
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helper dialog: hydrograph editor for a single line
@@ -2038,6 +2068,12 @@ class DebrisFlowDialog(QDialog):
             v = s_fix.value()
             return (v, v)
 
+        # η and K span orders of magnitude (K: 24…2400) → log-uniform sampling,
+        # otherwise ~90 % of the K samples would lie above 260
+        def _log_rng(chk, s_min, s_max, s_fix):
+            lo, hi = _rng(chk, s_min, s_max, s_fix)
+            return (math.log10(lo), math.log10(hi))
+
         if self.chk_vol_vary.isChecked():
             lo_vol = math.log10(max(self.spin_vol_min.value(), 1.0))
             hi_vol = math.log10(max(self.spin_vol_max.value(), 2.0))
@@ -2049,12 +2085,12 @@ class DebrisFlowDialog(QDialog):
             "log_vol":   (lo_vol, hi_vol),
             "tau_yield": _rng(self.chk_tau_vary, self.spin_tau_min,
                                self.spin_tau_max, self.spin_tau_fixed),
-            "eta":       _rng(self.chk_eta_vary, self.spin_eta_min,
-                               self.spin_eta_max, self.spin_eta_fixed),
+            "log_eta":   _log_rng(self.chk_eta_vary, self.spin_eta_min,
+                                   self.spin_eta_max, self.spin_eta_fixed),
             "manning_n": _rng(self.chk_n_vary,  self.spin_n_min,
                                self.spin_n_max,  self.spin_n_fixed),
-            "K_visc":    _rng(self.chk_K_vary,  self.spin_K_min,
-                               self.spin_K_max,  self.spin_K_fixed),
+            "log_K_visc": _log_rng(self.chk_K_vary, self.spin_K_min,
+                                   self.spin_K_max, self.spin_K_fixed),
         }
 
         params = dict(
@@ -2881,7 +2917,7 @@ class SweepResultsDialog(QDialog):
     Displays the results of the LHS sweep:
       - best parameters (minimum Cm)
       - table of the top 10 runs
-      - quintile sensitivity analysis (Section 7.5)
+      - sensitivity analysis: quintiles of Cm, Spearman ρ, volume control
       - paths to the raster and CSV
     """
 
@@ -3006,92 +3042,106 @@ class SweepResultsDialog(QDialog):
 
         inner_lo.addWidget(tbl)
 
-        # ── Quintile sensitivity analysis (Section 7.5) ──────────────────────
-        grp_q = QGroupBox(
-            "Parameter sensitivity analysis (Section 7.5 — volume control)")
+        # ── Sensitivity analysis: quintiles of Cm, rank correlation ─────────
+        grp_q = QGroupBox("Parameter sensitivity (quintiles of Cm, rank correlation)")
         grp_q.setStyleSheet(
             "QGroupBox{border:1px solid #aaa;border-radius:4px;margin-top:6px}"
             "QGroupBox::title{padding:0 4px}")
         grp_q_lo = QVBoxLayout(grp_q)
 
         note_q = QLabel(
-            "<b>What this means (Barnhart et al. 2021, Section 7.5):</b><br>"
-            "For each parameter (τy, η, n) the simulations are split into 5 quintiles "
-            "(Q1=small values…Q5=large). Within each quintile the mean Cm "
-            "is computed. If the quintiles give different Cm → the parameter matters "
-            "(even after volume control). If all quintiles are close → the parameter does not matter."
-        )
+            "<b>How to read it:</b> for each parameter the runs are split into 5 quintiles "
+            "(Q1 = smallest values … Q5 = largest) and the mean Cm of every quintile is "
+            "shown. ρ is the Spearman rank correlation between the parameter and Cm with "
+            "a 95 % bootstrap interval; an interval that excludes 0 indicates an influence.<br>"
+            "<b>Volume control</b> (second table): Cm residuals after a linear regression "
+            "of Cm on log₁₀V, so that the dominant effect of the volume does not mask the "
+            "other parameters. This is the plugin's own procedure; its equivalence to "
+            "Barnhart et al. (2021, Section 7.5) has not been verified.")
         note_q.setWordWrap(True)
         note_q.setStyleSheet("font-size:11px; color:#333; margin-bottom:4px")
         grp_q_lo.addWidget(note_q)
 
-        params_sens = [
-            ("tau_yield_Pa", "τy [Pa]"),
-            ("eta_Pas",      "η [Pa·s]"),
-            ("manning_n",    "n"),
-        ]
+        cm_raw = {id(r): float(r["Cm"]) for r in ok_rows}
+        cm_vc = dict(cm_raw)
+        _vr = [r for r in ok_rows if (r.get("vol_m3") or 0) > 0]
+        if len(_vr) >= 10:
+            _res = _volume_residuals(np.log10([float(r["vol_m3"]) for r in _vr]),
+                                     [cm_raw[id(r)] for r in _vr])
+            for r, v in zip(_vr, _res):
+                cm_vc[id(r)] = float(v)
 
-        sens_tbl = QTableWidget()
-        sens_tbl.setColumnCount(7)  # parameter + Q1..Q5 + spread
-        sens_tbl.setHorizontalHeaderLabels(
-            ["Parameter", "Q1 (min.)", "Q2", "Q3", "Q4", "Q5 (max.)",
-             "Cm spread"])
-        sens_tbl.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        sens_tbl.setEditTriggers(QTableWidget.NoEditTriggers)
-        sens_tbl.verticalHeader().setVisible(False)
+        def _sens_table(params_sens, cm_of):
+            tbl = QTableWidget()
+            tbl.setColumnCount(8)
+            tbl.setHorizontalHeaderLabels(["Parameter", "Q1 (min.)", "Q2", "Q3", "Q4", "Q5 (max.)", "Cm spread", "ρ [95 % CI]"])
+            tbl.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+            tbl.setEditTriggers(QTableWidget.NoEditTriggers)
+            tbl.verticalHeader().setVisible(False)
+            for param_key, param_label in params_sens:
+                vals = [(float(r.get(param_key)), cm_of[id(r)])
+                        for r in ok_rows if r.get(param_key) is not None]
+                if len(vals) < 10:
+                    continue
+                vals.sort(key=lambda x: x[0])
+                n_q = len(vals)
+                q_size = n_q // 5
+                q_means = []
+                for qi in range(5):
+                    start = qi * q_size
+                    end   = (qi + 1) * q_size if qi < 4 else n_q
+                    q_cm  = [v[1] for v in vals[start:end]]
+                    q_means.append(float(np.mean(q_cm)) if q_cm else float("nan"))
+                spread = max(q_means) - min(q_means)
+                xs = np.array([v[0] for v in vals]); ys = np.array([v[1] for v in vals])
+                if np.ptp(xs) > 0:
+                    rho = _spearman(xs, ys)
+                    lo, hi = _spearman_ci(xs, ys)
+                else:
+                    rho = lo = hi = float("nan")
+                sig = (lo == lo) and not (lo <= 0.0 <= hi)
+                is_important = spread > 0.05 or sig
 
-        for param_key, param_label in params_sens:
-            vals = [(r.get(param_key), r.get("Cm"))
-                    for r in ok_rows
-                    if r.get(param_key) is not None and r.get("Cm") is not None]
-            if len(vals) < 10:
-                continue
-            vals.sort(key=lambda x: x[0])
-            n_q = len(vals)
-            q_size = n_q // 5
-            q_means = []
-            for qi in range(5):
-                start = qi * q_size
-                end   = (qi + 1) * q_size if qi < 4 else n_q
-                q_cm  = [v[1] for v in vals[start:end]]
-                q_means.append(float(np.mean(q_cm)) if q_cm else float("nan"))
+                row_i = tbl.rowCount()
+                tbl.insertRow(row_i)
+                lbl_item = QTableWidgetItem(param_label)
+                lbl_item.setTextAlignment(Qt.AlignCenter)
+                if is_important:
+                    lbl_item.setForeground(QColor("#1565C0"))
+                    lbl_item.setFont(QFont("", -1, QFont.Bold))
+                tbl.setItem(row_i, 0, lbl_item)
+                for qi, cm_mean in enumerate(q_means):
+                    cell = QTableWidgetItem(f"{cm_mean:.3f}" if cm_mean == cm_mean else "—")
+                    cell.setTextAlignment(Qt.AlignCenter)
+                    if cm_mean == cm_mean:
+                        g = int(min(255, max(0, 255 * (1 - cm_mean))))
+                        cell.setBackground(QColor(255 - g // 2, 255, 255 - g // 2))
+                    tbl.setItem(row_i, qi + 1, cell)
+                spread_item = QTableWidgetItem(f"{spread:.3f}")
+                spread_item.setTextAlignment(Qt.AlignCenter)
+                if is_important:
+                    spread_item.setForeground(QColor("#C00000"))
+                    spread_item.setFont(QFont("", -1, QFont.Bold))
+                tbl.setItem(row_i, 6, spread_item)
+                rho_item = QTableWidgetItem(
+                    f"{rho:+.2f} [{lo:+.2f}; {hi:+.2f}]" if rho == rho else "—")
+                rho_item.setTextAlignment(Qt.AlignCenter)
+                if sig:
+                    rho_item.setForeground(QColor("#C00000"))
+                tbl.setItem(row_i, 7, rho_item)
+            tbl.setMaximumHeight(28 * (tbl.rowCount() + 1) + 10)
+            return tbl
 
-            spread = max(q_means) - min(q_means)
-            is_important = spread > 0.05
-
-            row_i = sens_tbl.rowCount()
-            sens_tbl.insertRow(row_i)
-
-            lbl_item = QTableWidgetItem(param_label)
-            lbl_item.setTextAlignment(Qt.AlignCenter)
-            if is_important:
-                lbl_item.setForeground(QColor("#1565C0"))
-                lbl_item.setFont(QFont("", -1, QFont.Bold))
-            sens_tbl.setItem(row_i, 0, lbl_item)
-
-            for qi, cm_mean in enumerate(q_means):
-                cell = QTableWidgetItem(f"{cm_mean:.3f}" if cm_mean == cm_mean else "—")
-                cell.setTextAlignment(Qt.AlignCenter)
-                # Visual colouring: low Cm = green (best)
-                if cm_mean == cm_mean:
-                    g = int(min(255, max(0, 255 * (1 - cm_mean))))
-                    cell.setBackground(QColor(255 - g // 2, 255, 255 - g // 2))
-                sens_tbl.setItem(row_i, qi + 1, cell)
-
-            spread_item = QTableWidgetItem(f"{spread:.3f}")
-            spread_item.setTextAlignment(Qt.AlignCenter)
-            if is_important:
-                spread_item.setForeground(QColor("#C00000"))
-                spread_item.setFont(QFont("", -1, QFont.Bold))
-            sens_tbl.setItem(row_i, 6, spread_item)
-
+        params_all = [("vol_m3", "V [m³]"), ("tau_yield_Pa", "τy [Pa]"), ("eta_Pas", "η [Pa·s]"),
+                       ("manning_n", "n"), ("K_visc", "K")]
+        sens_tbl = _sens_table(params_all, cm_raw)
         if sens_tbl.rowCount() > 0:
-            sens_tbl.setMaximumHeight(
-                28 * (sens_tbl.rowCount() + 1) + 10)
             grp_q_lo.addWidget(sens_tbl)
+            grp_q_lo.addWidget(QLabel("With volume control (Cm residuals after regression on log₁₀V):"))
+            grp_q_lo.addWidget(_sens_table(params_all[1:], cm_vc))
             note_interp = QLabel(
-                "Cm spread > 0.05 → the parameter AFFECTS the result (highlighted in blue/red).<br>"
-                "Cm spread ≤ 0.05 → the parameter is of little significance for the given range."
+                "Cm spread > 0.05 (heuristic threshold) or a ρ interval that excludes 0 → "
+                "the parameter AFFECTS the result (highlighted in blue/red)."
             )
             note_interp.setWordWrap(True)
             note_interp.setStyleSheet("font-size:10px; color:#555; margin-top:4px")
