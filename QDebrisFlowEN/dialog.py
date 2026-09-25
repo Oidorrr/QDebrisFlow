@@ -1174,6 +1174,8 @@ class DebrisFlowDialog(QDialog):
         self.worker = None
         # Hydrograph storage: {feature_id (int): dict}
         self._hydro_data     = {}
+        # id of the line layer the hydrographs belong to (fids are per layer)
+        self._hydro_layer_id = None
         self.sweep_worker    = None
         self._sweep_results  = []
         self._sweep_best_pkg = None
@@ -2697,6 +2699,9 @@ class DebrisFlowDialog(QDialog):
         # --- Hydrographs ---
         hydro_sec = data.get("hydrographs", {})
         self._hydro_data = {}
+        _src = self.src_line_combo.currentLayer()
+        self._hydro_layer_id = _src.id() if (src_name and _src is not None
+                                             and _src.name() == src_name) else None
         for fid_str, hdata in hydro_sec.items():
             try:
                 self._hydro_data[int(fid_str)] = hdata
@@ -2818,6 +2823,11 @@ class DebrisFlowDialog(QDialog):
                                 "The layer must be a line layer (LineString).")
             return
 
+        # hydrographs are keyed by fid, which is only unique within one layer:
+        # a different layer must not inherit them
+        if layer.id() != self._hydro_layer_id:
+            self._hydro_data = {}
+            self._hydro_layer_id = layer.id()
         feats = list(layer.getFeatures())
         if not feats:
             QMessageBox.warning(self, "Empty",
