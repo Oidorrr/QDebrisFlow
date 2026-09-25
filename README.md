@@ -38,11 +38,23 @@ Sf = τy/(γm·h)  +  K·η·V/(8·γm·h²)  +  n²·V²/h^(4/3)
 ```
 
 - **Yield + viscous + turbulent terms** combined in a single friction slope.
-- **Numerical scheme**: Local Inertial Approximation (Bates et al., 2010) with the
-  flux limiter of Almeida et al. (2012).
+- **Numerical scheme**: Local Inertial Approximation (Bates et al., 2010) on a
+  staggered grid. Manning and viscous terms are semi-implicit and use the full
+  discharge vector (coupled friction, Cozzolino et al. 2021, eqs. 19–21).
+- **Yield stress**: the impulse g·Δt·τy/γm acts against the trial discharge vector
+  before the implicit division, so motion starts exactly at h·|∇η| > τy/γm (= h_stop)
+  for any flow direction, time step, viscosity and K.
+- **Options** (Solver Settings): θ-weighting of the discharge (de Almeida et al.
+  2012; default θ = 1 = original scheme, 0.8–0.9 damps oscillations in steep
+  low-friction channels) and a face-depth limiter hf ≤ ½(hL+hR) (default ON as in
+  earlier versions; its source is unconfirmed — it was attributed to Almeida et al.
+  2012, eq. 2 — and it slows wetting fronts).
+- **Inflow**: the exact volume of the piecewise-linear hydrograph is injected over
+  every time step; the time step also respects CFL for the depth the inflow adds.
 - **Compute backend**: optional **Numba JIT**; the solver falls back to pure NumPy
-  when Numba is unavailable (the physics and results are identical). The plugin
-  GUI requires Numba to launch a run.
+  when Numba is unavailable (results agree to round-off in stable flows; in
+  oscillating steep channels the difference grows). The plugin GUI requires
+  Numba to launch a run.
 
 ---
 
@@ -56,10 +68,13 @@ The dialog is organised into five tabs:
 2. **O'Brien Parameters** — sediment concentration `Cv`, component densities
    (`ρs`, `ρw`), yield stress `τy` and mixture viscosity `η` (direct input *or*
    exponential coefficients), Manning `n`, and the viscous shape factor `K`.
-3. **Solver Settings** — simulation duration, maximum time step `dt_max`, and the
-   CFL number.
+3. **Solver Settings** — simulation duration, maximum time step `dt_max`, the CFL
+   number (0.10–0.70), θ-weighting and the face-depth limiter; a **Stop** button
+   interrupts a running simulation.
 4. **Output** — file prefix, output folder, output-layer selection, depth-threshold
-   filtering of the written rasters, and save/load of all parameters as JSON.
+   filtering of the written rasters, the depth that defines the arrival time, and
+   save/load of all parameters as JSON. Every run also writes `<prefix>_run.json`
+   (all parameters, library versions, volume balance, warnings).
 5. **LHS analysis** — calibrate/validate against an observed inundation polygon and
    field depth-measurement points using Latin Hypercube Sampling, quality metrics,
    and a quintile sensitivity analysis; supports parallel worker threads.
@@ -73,7 +88,9 @@ The dialog is organised into five tabs:
 | `h_max`      | Maximum depth envelope               |
 | `V_max`      | Maximum velocity                     |
 | `h_final`    | Final deposit                        |
-| `t_arrival`  | Flow arrival time map                |
+| `t_arrival`  | Flow arrival time map (first time h ≥ the chosen depth, default 5 mm) |
+| `HV2_max`    | Maximum over time of the instantaneous h·v² [m³/s²] (impact assessment; `h_max·V_max²` overestimates it) |
+| `Fr_hv2`     | Froude number at the moment of peak h·v² (where the LIA is used outside its range) |
 
 Rasters are written as GeoTIFF and loaded into QGIS with a pseudocolour style.
 
@@ -96,7 +113,8 @@ QDebrisFlow/
 │   ├── plugin.py
 │   ├── dialog.py
 │   ├── qgis_runner.py         # raster read/write + rasterisation (GDAL/OGR)
-│   ├── dem_preprocess.py      # sink filling, flow accumulation, DEM checks
+│   ├── dem_preprocess.py      # standalone utilities (sink filling, flow accumulation,
+│   │                          # DEM checks); not used by the GUI
 │   ├── icon.png
 │   └── core/
 │       ├── __init__.py
@@ -153,12 +171,37 @@ Parameter sets can be saved to / loaded from JSON on the *Output* and
 
 The **LHS analysis** tab compares simulated against observed data:
 
-- Inputs: an observed **inundation polygon** and **field depth points**.
-- Quality metrics: `TP`, `FP`, `FN`, `ΩTm`, depth over-/under-estimation
+- Inputs: an observed **inundation polygon**, **field depth points** and an optional
+  **evaluation area** (cells outside it are ignored in TP/FP/FN). Vector layers in
+  another CRS are reprojected to the DEM CRS.
+- Quality metrics: `TP`, `FP`, `FN`, `ΩTm` (≡ 1 − CSI), depth over-/under-estimation
   (`Δo`, `Δu`), and the combined metric `Cm` (0 = best).
-- A **quintile sensitivity analysis** indicates which parameters (`τy`, `η`, `n`)
-  influence the result.
-- Results are written to CSV and the best run's `h_max` raster is added to QGIS.
+- Sampling: volume, `η` and `K` are sampled log-uniformly, `τy` and `n` uniformly.
+- Sensitivity: quintiles of `Cm` and Spearman ρ with a 95 % bootstrap interval for V,
+  `τy`, `η`, `n`, `K`, and a second table with volume control (Cm residuals after a
+  regression on log₁₀V — the plugin's own procedure).
+- Results are appended to the CSV after every run (a `_context.json` file keeps the
+  settings) and the best run's `h_max` raster is added to QGIS.
+
+---
+
+## Limitations
+
+- **Closed boundaries.** The edge of the DEM and nodata cells are walls: the flow
+  cannot leave the domain and accumulates at the edge. A warning is shown when the
+  flow reaches the boundary; extend the DEM beyond the expected runout.
+- **Local inertial approximation.** Convective acceleration is neglected; the LIA
+  agrees well with the full shallow-water equations only for Fr < 0.5 (de Almeida &
+  Bates 2013). Steep channels are often supercritical — check the `Fr_hv2` layer.
+- **Oscillations in steep channels.** With low friction (small K) the scheme can
+  pulsate; a symptom is velocity stuck at the 30 m/s cap (reported after the run).
+  θ-weighting 0.8–0.9 damps it.
+- **Rheological parameters.** K = 24 is the smooth wide-channel value; FLO-2D uses
+  up to ~50 000 on rough channels and 2285 for most urban studies. In the
+  exponential mode the plugin uses τy = α₁·e^(β₁Cv), η = α₂·e^(β₂Cv) — the opposite
+  of the FLO-2D indices; the default α/β have no established source.
+- **First-order scheme on a regular grid**: results depend on the cell size;
+  no entrainment/erosion, a single-phase mixture.
 
 ---
 
@@ -168,9 +211,12 @@ The following works are referenced in the source code:
 
 - O'Brien & Julien (1985, 1988) — quadratic rheological model
 - Bates et al. (2010) — local inertial approximation (LIA)
-- Almeida et al. (2012) — flux limiter
+- de Almeida et al. (2012) — θ-weighting of the LIA discharge
+- de Almeida & Bates (2013) — applicability of the LIA (Fr < 0.5)
+- Cozzolino et al. (2021) — coupled friction on staggered grids
+- Jakob, Stein & Ulmi (2012) — debris-flow intensity index d·v²
 - Barnhart et al. (2021) — calibration metrics, LHS, sensitivity analysis (FLO-2D)
-- Heiser (2017) — `ΩT` fit metric
+- Heiser, Scheidl & Kaitna (2017) — `ΩT` fit metric
 - Planchon & Darboux (2001) — depression filling
 - Morris (1991) — parameter screening
 
