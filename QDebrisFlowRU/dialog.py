@@ -428,16 +428,13 @@ class SimulationWorker(QThread):
 
     def run(self):
         try:
-            import sys
-            plugin_dir = os.path.dirname(os.path.abspath(__file__))
-            if plugin_dir not in sys.path:
-                sys.path.insert(0, plugin_dir)
-
-            from core.rheology import OBrienParameters
-            from core.solver   import (TerrainGrid, SimulationConfig,
+            # относительные импорты: верхнеуровневый `core` другого плагина (или другой
+            # языковой копии), загруженный раньше, не должен подменить наш
+            from .core.rheology import OBrienParameters
+            from .core.solver   import (TerrainGrid, SimulationConfig,
                                         SourceCondition, InflowSource,
                                         DebrisFlowSolver2D, hydrograph_volume)
-            from qgis_runner   import read_dem_array, write_geotiff
+            from .qgis_runner   import read_dem_array, write_geotiff
 
             p = self.params
 
@@ -618,7 +615,7 @@ class SimulationWorker(QThread):
                     "  Попробуйте θ-взвешивание 0.8–0.9 на вкладке «Настройки решателя».")
 
             rec_path = os.path.join(out_dir, f"{prefix}_run.json")
-            from core import solver as _solver_mod
+            from .core import solver as _solver_mod
             run_rec = dict(
                 created=time.strftime("%Y-%m-%d %H:%M:%S"),
                 runtime=dict(_runtime_info(), backend=(
@@ -762,16 +759,14 @@ class SweepWorker(QThread):
     def run(self):
         import sys, time
         plugin_dir = os.path.dirname(os.path.abspath(__file__))
-        if plugin_dir not in sys.path:
-            sys.path.insert(0, plugin_dir)
 
-        # Импортируем sweep_runner ПОСЛЕ добавления plugin_dir в sys.path
-        from core import sweep_runner as _sr
-        from core.solver import hydrograph_volume as _hydro_volume
+        # относительные импорты (см. SimulationWorker.run)
+        from .core import sweep_runner as _sr
+        from .core.solver import hydrograph_volume as _hydro_volume
 
         _csv_f = None
         try:
-            from qgis_runner import read_dem_array
+            from .qgis_runner import read_dem_array
 
             p = self.params
 
@@ -905,7 +900,7 @@ class SweepWorker(QThread):
                        "FN", "omega_Tm", "delta_o_c", "delta_u", "Cm", "depth_bias_m", "eta_min"],
                                      extrasaction="ignore", restval="")
             _csv_w.writeheader(); _csv_f.flush()
-            from core import solver as _solver_mod
+            from .core import solver as _solver_mod
             ctx = dict(created=time.strftime("%Y-%m-%d %H:%M:%S"),
                        runtime=dict(_runtime_info(), backend=(
                            "Numba JIT" if _solver_mod._NUMBA_AVAILABLE else "NumPy")),
@@ -2487,7 +2482,7 @@ class DebrisFlowDialog(QDialog):
             base = csv_name.replace(".csv", "")
             raster_path = os.path.join(out_dir, f"best_h_max_{base}.tif")
             try:
-                from qgis_runner import write_geotiff
+                from .qgis_runner import write_geotiff
                 # Применяем порог: пиксели < threshold → 0 → nodata (zero_as_nodata=True)
                 thr   = self.spin_depth_thr.value()
                 h_out = self._sweep_best_pkg["h_max"].copy()
@@ -3026,7 +3021,7 @@ class DebrisFlowDialog(QDialog):
                 "Попробуйте: pip install --upgrade numba")
 
         # Шаг 2: проверяем флаг в solver (только если модуль уже импортирован)
-        for key in ('core.solver', 'debris_flow_obrien.core.solver'):
+        for key in (f"{__package__}.core.solver", "core.solver"):
             solver_mod = sys.modules.get(key)
             if solver_mod is not None:
                 if not getattr(solver_mod, '_NUMBA_AVAILABLE', True):

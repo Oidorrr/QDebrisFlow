@@ -139,14 +139,11 @@ def run_one_sample(args: dict) -> dict:
 
     Возвращает row_data dict (включая h_max для отслеживания лучшего прогона).
     """
-    # ── Инициализация пути (нужна в дочернем процессе) ────────────────────────
-    plugin_dir = args.get("plugin_dir", "")
-    if plugin_dir and plugin_dir not in sys.path:
-        sys.path.insert(0, plugin_dir)
-
+    # относительные импорты: модуль входит в пакет `core` плагина, поэтому
+    # верхнеуровневый `core` другого плагина его не подменит (args["plugin_dir"] не нужен)
     try:
-        from core.rheology import OBrienParameters
-        from core.solver   import (TerrainGrid, SimulationConfig,
+        from .rheology import OBrienParameters
+        from .solver   import (TerrainGrid, SimulationConfig,
                                     SourceCondition, InflowSource,
                                     DebrisFlowSolver2D)
     except ImportError as exc:
