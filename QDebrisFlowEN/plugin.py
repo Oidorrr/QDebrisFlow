@@ -85,6 +85,13 @@ class DebrisFlowPlugin:
                     QgsColorRampShader.ColorRampItem(vmin + (vmax - vmin) * 0.66, QColor(255, 80, 0), ""),
                     QgsColorRampShader.ColorRampItem(vmax, QColor(180, 0, 0), f"{vmax:.2f} m/s"),
                 ]
+            elif style == "intensity":
+                items = [
+                    QgsColorRampShader.ColorRampItem(vmin, QColor(255, 255, 200), f"{vmin:.2f} m³/s²"),
+                    QgsColorRampShader.ColorRampItem(vmin + (vmax - vmin) * 0.33, QColor(255, 200, 0), ""),
+                    QgsColorRampShader.ColorRampItem(vmin + (vmax - vmin) * 0.66, QColor(255, 80, 0), ""),
+                    QgsColorRampShader.ColorRampItem(vmax, QColor(120, 0, 60), f"{vmax:.2f} m³/s²"),
+                ]
             else:  # arrival time
                 items = [
                     QgsColorRampShader.ColorRampItem(vmin, QColor(255, 255, 0), f"{vmin:.0f}s"),
