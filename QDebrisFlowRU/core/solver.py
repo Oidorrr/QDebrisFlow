@@ -667,6 +667,7 @@ class DebrisFlowSolver2D:
         cell_area = dx * dy
 
         t_sim = 0.; t_last = 0.; ever_wet = False; t_wall = time.time()
+        inflow_done = False
 
         while t_sim < t_end:
 
@@ -710,6 +711,13 @@ class DebrisFlowSolver2D:
 
             if not ever_wet and wet > 0:
                 ever_wet = True
+
+            # все расходы на гранях ровно 0 и притока больше не будет → состояние неподвижно
+            # (проверка текучести |F| ≤ g·Δt·τy/γm не зависит от Δt) — останавливаемся
+            if not inflow_done:
+                inflow_done = all(s.volume_between(t_sim, t_end) <= 0. for s in self._sources)
+            if inflow_done and ever_wet and not Qx.any() and not Qy.any():
+                log.info(f"Поток остановился и притока больше нет: остановка при t={t_sim:.1f} с"); break
 
             if t_sim - t_last >= out_iv:
                 self.h[:]=h; self.Qx[:]=Qx; self.Qy[:]=Qy
