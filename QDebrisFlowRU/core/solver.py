@@ -565,11 +565,18 @@ class DebrisFlowSolver2D:
 
             dt_cfl, V, wet = _cfl_vol_wet(h, mv, cfl, dmin, dx, dy, h_min)
             dt = min(dt_cfl, dt_max, t_end - t_sim)
+            # CFL должно выполняться и для глубины, которую приток добавит за этот шаг (на
+            # сухом домене dt_cfl = 1e9, и первый шаг иначе шёл бы с dt_max)
+            q_now = [src.q_at(t_sim) for src in self.source.inflow_sources]
+            for src, q_t in zip(self.source.inflow_sources, q_now):
+                if q_t > 0.:
+                    h_src = (float(h[src.rows, src.cols].max())
+                             + q_t * dt / (src.n_cells * cell_area))
+                    dt = min(dt, cfl * dmin / (GRAVITY * h_src)**0.5)
             if dt < dt_min:
                 raise RuntimeError(f"CFL шаг {dt:.6f} с < dt_min={dt_min} с")
 
-            for src in self.source.inflow_sources:
-                q_t = src.q_at(t_sim)
+            for src, q_t in zip(self.source.inflow_sources, q_now):
                 if q_t > 0.:
                     rate = q_t / (src.n_cells * cell_area)
                     self._total_inflow_vol += q_t * dt
