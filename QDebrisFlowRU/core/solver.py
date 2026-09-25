@@ -83,6 +83,24 @@ class TerrainGrid:
         return self._z
 
 
+def boundary_cells(mask_valid: np.ndarray) -> np.ndarray:
+    """
+    Валидные ячейки на границе домена: край сетки или соседство с ячейкой
+    nodata. Все граничные грани — непроницаемые стенки (оттока нет), поэтому
+    поток, дошедший до этих ячеек, накапливается там, а не уходит.
+    """
+    m = np.asarray(mask_valid, dtype=bool)
+    b = np.zeros_like(m)
+    b[0, :] = b[-1, :] = True
+    b[:, 0] = b[:, -1] = True
+    inv = ~m
+    b[1:, :] |= inv[:-1, :]
+    b[:-1, :] |= inv[1:, :]
+    b[:, 1:] |= inv[:, :-1]
+    b[:, :-1] |= inv[:, 1:]
+    return b & m
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # InflowSource + SourceCondition + SimulationConfig
 # ─────────────────────────────────────────────────────────────────────────────
@@ -647,6 +665,11 @@ class DebrisFlowSolver2D:
                 log.info(f"Поток остановился t={t_sim:.1f} с"); break
 
         self.h[:]=h; self.Qx[:]=Qx; self.Qy[:]=Qy; self.t=t_sim
+        bnd = boundary_cells(self.terrain.mask_valid)
+        edge_h_max = float(self.h_max[bnd].max()) if bnd.any() else 0.0
+        if edge_h_max >= h_min:
+            log.warning(f"Поток дошёл до непроницаемой границы домена: h_max на краю = "
+                        f"{edge_h_max:.3f} м — жидкость накапливается там, а не уходит")
         log.info(f"Завершено [{backend}]: {self.n_steps} шагов, "
                  f"{t_sim:.1f} с, {time.time()-t_wall:.2f} с CPU")
 
@@ -660,6 +683,7 @@ class DebrisFlowSolver2D:
             initial_volume=self.volume_initial,
             HV2_max=self.HV2_max,
             Fr_hv2=self.Fr_hv2,
+            edge_h_max=edge_h_max,
         )
 
 
@@ -690,6 +714,8 @@ class SimulationResult:
     # бесполезен: его задаёт тонкая плёнка на фронте (h ≈ h_min), где V/√(g·h) огромно;
     # Fr в момент пика h·v² характеризует основное тело потока.
     Fr_hv2:           Optional[np.ndarray] = None
+    # максимум h_max по граничным ячейкам (край сетки / соседство с nodata); > h_min → поток у стенки
+    edge_h_max:       float = 0.0
 
     def max_inundation_area(self, h_threshold: float = 0.01) -> float:
         return np.sum(self.h_max > h_threshold) * self.terrain.dx * self.terrain.dy
