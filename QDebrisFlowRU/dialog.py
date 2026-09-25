@@ -31,7 +31,8 @@ from qgis.PyQt.QtWidgets import (
 )
 from qgis.PyQt.QtCore import Qt, QThread, pyqtSignal
 from qgis.PyQt.QtGui import QColor, QFont
-from qgis.core import QgsMapLayerProxyModel, QgsWkbTypes, QgsGeometry, QgsPointXY
+from qgis.core import (QgsMapLayerProxyModel, QgsWkbTypes, QgsGeometry, QgsPointXY,
+                       QgsCoordinateTransform, QgsProject)
 from qgis.gui import QgsMapLayerComboBox
 
 _H_MIN = 0.005   # мин. глубина мокрой ячейки [м] — скрыто от пользователя
@@ -96,6 +97,55 @@ def _volume_residuals(log_v, cm) -> np.ndarray:
     A = np.vstack([log_v, np.ones_like(log_v)]).T
     coef = np.linalg.lstsq(A, cm, rcond=None)[0]
     return cm - A @ coef + cm.mean()
+
+
+
+def _to_dem_crs(geom, src_crs, dem_crs):
+    """Копия геометрии, перепроецированная из src_crs в CRS ЦМР (если CRS совпадают — без изменений)."""
+    g = QgsGeometry(geom)
+    if src_crs.isValid() and dem_crs.isValid() and src_crs != dem_crs:
+        g.transform(QgsCoordinateTransform(src_crs, dem_crs, QgsProject.instance()))
+    return g
+
+
+def _layer_wkts(layer, dem_crs) -> list:
+    """WKT всех объектов слоя в CRS ЦМР (читается в главном потоке)."""
+    return [_to_dem_crs(f.geometry(), layer.crs(), dem_crs).asWkt()
+            for f in layer.getFeatures() if f.hasGeometry()]
+
+
+def _layer_points(layer, field: str, dem_crs) -> list:
+    """(x, y, глубина) всех точек слоя в CRS ЦМР; MultiPoint разбивается на точки."""
+    out = []
+    for f in layer.getFeatures():
+        if not f.hasGeometry():
+            continue
+        try:
+            d = float(f[field])
+        except (KeyError, TypeError, ValueError):
+            continue
+        g = _to_dem_crs(f.geometry(), layer.crs(), dem_crs)
+        pts = g.asMultiPoint() if g.isMultipart() else [g.asPoint()]
+        out.extend((p.x(), p.y(), d) for p in pts)
+    return out
+
+
+def _feature_wkt(layer, fid, dem_crs) -> str:
+    """WKT одного объекта в CRS ЦМР или '', если объекта/геометрии нет."""
+    f = layer.getFeature(fid)
+    if not f.isValid() or not f.hasGeometry():
+        return ""
+    return _to_dem_crs(f.geometry(), layer.crs(), dem_crs).asWkt()
+
+
+def _check_dem_crs(dem_layer) -> str:
+    """'' если CRS ЦМР пригодна, иначе — сообщение для пользователя."""
+    crs = dem_layer.crs()
+    if crs.isValid() and crs.isGeographic():
+        return (f"ЦМР в географической системе координат ({crs.authid()}): размер ячейки\n"
+                "в градусах, а не в метрах, и расчёт будет бессмысленным.\n"
+                "Перепроецируйте ЦМР в прямоугольную систему в метрах (например, UTM).")
+    return ""
 
 
 
@@ -320,9 +370,8 @@ class SimulationWorker(QThread):
             src_layer = p["source_layer"]
             if p["dem_layer"].crs() != src_layer.crs():
                 self.log_message.emit(
-                    f"⚠ CRS не совпадают: DEM={p['dem_layer'].crs().authid()}, "
-                    f"линии={src_layer.crs().authid()}. "
-                    "Перепроецируйте линейный слой в CRS DEM.")
+                    f"CRS: DEM={p['dem_layer'].crs().authid()}, "
+                    f"линии={src_layer.crs().authid()} — линии перепроецированы в CRS DEM.")
 
             # ── Растеризация по объектам → InflowSource на каждый ────────────
             # p["sources"] = list of {fid, name, times, q_vals}
@@ -332,14 +381,12 @@ class SimulationWorker(QThread):
                 name = src_info["name"]
                 self.log_message.emit(f"  Растеризация: {name} (ID={fid})...")
 
-                feat = next(
-                    (f for f in src_layer.getFeatures() if f.id() == fid),
-                    None)
-                if feat is None or not feat.geometry():
+                wkt = src_info.get("wkt")
+                if not wkt:
                     self.log_message.emit(f"    ⚠ Объект ID={fid} не найден, пропуск.")
                     continue
 
-                rows, cols = self._rasterise_feature(feat, geo_info)
+                rows, cols = self._rasterise_feature(wkt, geo_info)
                 if len(rows) == 0:
                     self.log_message.emit(
                         f"    ⚠ Объект ID={fid} не пересекает DEM, пропуск.")
@@ -494,7 +541,7 @@ class SimulationWorker(QThread):
 
     # ── Растеризация одного объекта ───────────────────────────────────────────
 
-    def _rasterise_feature(self, feature, geo_info: dict):
+    def _rasterise_feature(self, wkt: str, geo_info: dict):
         """
         Растеризует один объект (линию) → (rows_array, cols_array).
         Использует GDAL через OGR с in-memory слоем, без записи на диск.
@@ -525,7 +572,6 @@ class SimulationWorker(QThread):
             lyr.CreateField(fld)
 
             ogr_feat = ogr.Feature(lyr.GetLayerDefn())
-            wkt = feature.geometry().asWkt()
             ogr_feat.SetGeometry(ogr.CreateGeometryFromWkt(wkt))
             ogr_feat.SetField("fid", 1)
             lyr.CreateFeature(ogr_feat)
@@ -548,7 +594,7 @@ class SimulationWorker(QThread):
             xmin     = geo_info["xmin"]
             ymax     = geo_info["ymax"]
             nx, ny   = geo_info["nx"], geo_info["ny"]
-            geom     = feature.geometry()
+            geom     = QgsGeometry.fromWkt(wkt)
             thresh   = (dx**2 + dy**2)**0.5 * 0.5
             mask     = np.zeros((ny, nx), dtype=bool)
             for row in range(ny):
@@ -614,12 +660,10 @@ class SweepWorker(QThread):
             self.sweep_log.emit("Растеризация источников...")
             src_cells = []
             for src_info in p["sources"]:
-                feat = next(
-                    (f for f in p["source_layer"].getFeatures()
-                     if f.id() == src_info["fid"]), None)
-                if feat is None:
+                wkt = src_info.get("wkt")
+                if not wkt:
                     continue
-                rows, cols = self._rasterise_feature(feat, geo_info)
+                rows, cols = self._rasterise_feature(wkt, geo_info)
                 if len(rows) == 0:
                     continue
                 src_cells.append({
@@ -650,11 +694,11 @@ class SweepWorker(QThread):
 
             # ── Наблюдаемая инундация ─────────────────────────────────────────
             self.sweep_log.emit("Растеризация полигона инундации...")
-            obs_mask = self._rasterize_polygon(p["obs_poly_layer"], geo_info)
+            obs_mask = self._rasterize_polygon(p["obs_poly_wkts"], geo_info)
             self.sweep_log.emit(f"Наблюдаемая инундация: {obs_mask.sum()} ячеек")
             eval_mask = None
-            if p.get("eval_poly_layer") is not None:
-                eval_mask = self._rasterize_polygon(p["eval_poly_layer"], geo_info)
+            if p.get("eval_poly_wkts"):
+                eval_mask = self._rasterize_polygon(p["eval_poly_wkts"], geo_info)
                 obs_out = int(np.sum(obs_mask & ~eval_mask))
                 self.sweep_log.emit(
                     f"Область оценки: {int(eval_mask.sum())} ячеек"
@@ -663,7 +707,7 @@ class SweepWorker(QThread):
             # ── Точки глубин ──────────────────────────────────────────────────
             self.sweep_log.emit("Чтение точек глубин...")
             obs_rows, obs_cols, obs_depths = self._extract_depth_points(
-                p["obs_pts_layer"], p["depth_field"], geo_info)
+                p["obs_pts"], geo_info)
             self.sweep_log.emit(f"Точек замеров в домене: {len(obs_depths)}")
 
             # ── LHS выборка ───────────────────────────────────────────────────
@@ -836,7 +880,7 @@ class SweepWorker(QThread):
 
     # ── Вспомогательные методы ────────────────────────────────────────────────
 
-    def _rasterise_feature(self, feature, geo_info):
+    def _rasterise_feature(self, wkt, geo_info):
         """Та же растеризация что и в SimulationWorker."""
         try:
             from osgeo import gdal, ogr, osr
@@ -856,7 +900,7 @@ class SweepWorker(QThread):
             lyr.CreateField(ogr.FieldDefn("fid", ogr.OFTInteger))
             ogr_feat = ogr.Feature(lyr.GetLayerDefn())
             ogr_feat.SetGeometry(
-                ogr.CreateGeometryFromWkt(feature.geometry().asWkt()))
+                ogr.CreateGeometryFromWkt(wkt))
             ogr_feat.SetField("fid", 1)
             lyr.CreateFeature(ogr_feat)
             ras_ds = gdal.GetDriverByName("MEM").Create(
@@ -871,7 +915,7 @@ class SweepWorker(QThread):
             dx, dy = geo_info["dx"], geo_info["dy"]
             xmin, ymax = geo_info["xmin"], geo_info["ymax"]
             nx, ny = geo_info["nx"], geo_info["ny"]
-            geom   = feature.geometry()
+            geom   = QgsGeometry.fromWkt(wkt)
             thresh = (dx**2 + dy**2)**0.5 * 0.5
             mask   = np.zeros((ny, nx), dtype=bool)
             for row in range(ny):
@@ -883,7 +927,7 @@ class SweepWorker(QThread):
                         mask[row, col] = True
             return np.where(mask)
 
-    def _rasterize_polygon(self, poly_layer, geo_info) -> np.ndarray:
+    def _rasterize_polygon(self, wkts, geo_info) -> np.ndarray:
         """
         Растеризует полигональный слой инундации → bool-маска (ny, nx).
         Значение 1 = наблюдалась инундация.
@@ -907,12 +951,9 @@ class SweepWorker(QThread):
                                       geom_type=ogr.wkbPolygon)
             lyr.CreateField(ogr.FieldDefn("val", ogr.OFTInteger))
 
-            for feat in poly_layer.getFeatures():
-                if feat.geometry() is None:
-                    continue
+            for wkt in wkts:
                 ogr_feat = ogr.Feature(lyr.GetLayerDefn())
-                ogr_feat.SetGeometry(
-                    ogr.CreateGeometryFromWkt(feat.geometry().asWkt()))
+                ogr_feat.SetGeometry(ogr.CreateGeometryFromWkt(wkt))
                 ogr_feat.SetField("val", 1)
                 lyr.CreateFeature(ogr_feat)
 
@@ -934,8 +975,7 @@ class SweepWorker(QThread):
             dx, dy = geo_info["dx"], geo_info["dy"]
             xmin, ymax = geo_info["xmin"], geo_info["ymax"]
             mask = np.zeros((ny, nx), dtype=bool)
-            polys = [f.geometry() for f in poly_layer.getFeatures()
-                     if f.geometry() is not None]
+            polys = [QgsGeometry.fromWkt(w) for w in wkts]
             for row in range(ny):
                 cy = ymax - (row + 0.5) * dy
                 for col in range(nx):
@@ -945,10 +985,9 @@ class SweepWorker(QThread):
                         mask[row, col] = True
             return mask
 
-    def _extract_depth_points(self, pts_layer, depth_field: str,
-                               geo_info: dict):
+    def _extract_depth_points(self, pts, geo_info: dict):
         """
-        Извлекает точки наблюдаемых глубин из point SHP.
+        Привязывает точки наблюдённых глубин [(x, y, глубина) в CRS ЦМР] к ячейкам сетки.
         Возвращает (row_arr, col_arr, depth_arr) — только точки в домене.
         """
         gt   = geo_info["geotransform"]
@@ -960,23 +999,14 @@ class SweepWorker(QThread):
         nx   = geo_info["nx"]
 
         rows, cols, depths = [], [], []
-        for feat in pts_layer.getFeatures():
-            geom = feat.geometry()
-            if geom is None or geom.isEmpty():
-                continue
-            try:
-                d = float(feat[depth_field])
-            except (KeyError, TypeError, ValueError):
-                continue
-            # допускается MultiPoint; floor (а не int), чтобы точки левее/выше сетки отбрасывались
-            pts = geom.asMultiPoint() if geom.isMultipart() else [geom.asPoint()]
-            for pt in pts:
-                col = int(np.floor((pt.x() - xmin) / dx))
-                row = int(np.floor((ymax - pt.y()) / dy))
-                if 0 <= row < ny and 0 <= col < nx:
-                    rows.append(row)
-                    cols.append(col)
-                    depths.append(d)
+        for x, y, d in pts:
+            # floor (а не int): точки левее/выше сетки отбрасываются
+            col = int(np.floor((x - xmin) / dx))
+            row = int(np.floor((ymax - y) / dy))
+            if 0 <= row < ny and 0 <= col < nx:
+                rows.append(row)
+                cols.append(col)
+                depths.append(d)
 
         return (np.array(rows, dtype=np.int64),
                 np.array(cols, dtype=np.int64),
@@ -2072,6 +2102,10 @@ class DebrisFlowDialog(QDialog):
                 "Выберите поле глубины [м] в точечном слое."); return
 
         # Валидация диапазонов (только для варьируемых параметров)
+        _crs_msg = _check_dem_crs(dem_layer)
+        if _crs_msg:
+            QMessageBox.warning(self, "CRS", _crs_msg); return
+
         err = []
         if self.chk_vol_vary.isChecked() and \
                 self.spin_vol_min.value() >= self.spin_vol_max.value():
@@ -2114,6 +2148,7 @@ class DebrisFlowDialog(QDialog):
                 continue
             sources.append({
                 "fid":    fid, "name": fname,
+                "wkt":    _feature_wkt(src_layer, fid, dem_layer.crs()),
                 "times":  data["times"],
                 "q_vals": data["q_vals"],
             })
@@ -2163,6 +2198,10 @@ class DebrisFlowDialog(QDialog):
             source_layer    = src_layer,
             sources         = sources,
             obs_poly_layer  = obs_poly,
+            obs_poly_wkts   = _layer_wkts(obs_poly, dem_layer.crs()),
+            obs_pts         = _layer_points(obs_pts, depth_fld, dem_layer.crs()),
+            eval_poly_wkts  = (_layer_wkts(self.combo_eval_poly.currentLayer(), dem_layer.crs())
+                               if self.combo_eval_poly.currentLayer() is not None else None),
             eval_poly_layer = self.combo_eval_poly.currentLayer(),
             obs_pts_layer   = obs_pts,
             depth_field     = depth_fld,
@@ -2846,6 +2885,10 @@ class DebrisFlowDialog(QDialog):
                 "Отметьте хотя бы один выходной слой\n"
                 "на вкладке «Выходные данные»."); return
 
+        _crs_msg = _check_dem_crs(dem_layer)
+        if _crs_msg:
+            QMessageBox.warning(self, "CRS", _crs_msg); return
+
         Cv = self.spin_Cv.value(); Cv_max = self.spin_Cv_max.value()
         if Cv >= Cv_max:
             QMessageBox.warning(self, "Параметр",
@@ -2869,6 +2912,7 @@ class DebrisFlowDialog(QDialog):
             sources.append({
                 "fid":    fid,
                 "name":   fname,
+                "wkt":    _feature_wkt(src_layer, fid, dem_layer.crs()),
                 "times":  data["times"],
                 "q_vals": data["q_vals"],
             })
