@@ -346,7 +346,7 @@ if _NUMBA_AVAILABLE:
             h[rows[k], cols[k]] += rate * dt
 
     @njit(cache=True, fastmath=True, nogil=True)
-    def _update_max(h, Qx, Qy, h_max, V_max, t_arrival, h_min, t, HV2_max):
+    def _update_max(h, Qx, Qy, h_max, V_max, t_arrival, h_min, t, HV2_max, Fr_hv2):
         ny, nx = h.shape[0], h.shape[1]
         nxm, nym = nx - 1, ny - 1
         for i in range(ny):
@@ -366,7 +366,9 @@ if _NUMBA_AVAILABLE:
                 vm = min((qx*qx+qy*qy)**0.5/hd, 30.)
                 if vm > V_max[i, j]: V_max[i, j] = vm
                 hv2 = hv * vm * vm          # instantaneous h·v² [m³/s²]
-                if hv2 > HV2_max[i, j]: HV2_max[i, j] = hv2
+                if hv2 > HV2_max[i, j]:
+                    HV2_max[i, j] = hv2
+                    Fr_hv2[i, j] = vm / (9.81 * hd)**0.5   # Froude number V/√(g·h) at the moment of peak h·v²
                 if t_arrival[i, j] > 1e30: t_arrival[i, j] = t
 
 else:
@@ -453,7 +455,7 @@ else:
     def _add_inflow(h, rows, cols, rate, dt):
         h[rows, cols] += rate * dt
 
-    def _update_max(h, Qx, Qy, h_max, V_max, t_arrival, h_min, t, HV2_max):
+    def _update_max(h, Qx, Qy, h_max, V_max, t_arrival, h_min, t, HV2_max, Fr_hv2):
         np.maximum(h_max, h, out=h_max)
         ny, nx = h.shape
         hd = np.maximum(h, h_min)
@@ -464,6 +466,8 @@ else:
         vm = np.minimum(np.sqrt(Qxc**2+Qyc**2)/hd, 30.)
         np.maximum(V_max, vm, out=V_max)
         hv2 = np.where(h >= h_min, h * vm**2, 0.)     # instantaneous h·v² [m³/s²]
+        up = hv2 > HV2_max   # Froude number V/√(g·h) at the moment of peak h·v²
+        Fr_hv2[up] = (vm / np.sqrt(9.81 * hd))[up]
         np.maximum(HV2_max, hv2, out=HV2_max)
         t_arrival[(h >= h_min) & np.isinf(t_arrival)] = t
 
@@ -485,11 +489,12 @@ def warmup_jit(h_min: float = 0.005) -> float:
     vm = np.zeros((4,4),dtype=np.float64)
     ta = np.full((4,4), np.inf, dtype=np.float64)
     hv = np.zeros((4,4),dtype=np.float64)
+    fr = np.zeros((4,4),dtype=np.float64)
     r  = np.zeros(2, dtype=np.int64)
     c  = np.arange(2, dtype=np.int64)
     _lia_step(h,Qx,Qy,z,mv,10.,10.,1.,h_min,0.0036,1e-4,0.001,True)
     _cfl_vol_wet(h,mv,0.4,10.,10.,10.,h_min)
-    _update_max(h,Qx,Qy,hm,vm,ta,h_min,0.,hv)
+    _update_max(h,Qx,Qy,hm,vm,ta,h_min,0.,hv,fr)
     _add_inflow(h,r,c,0.1,1.0)
     return time.time()-t0
 
@@ -515,6 +520,7 @@ class DebrisFlowSolver2D:
         self.V_max     = np.zeros((ny, nx), dtype=np.float64)
         self.t_arrival = np.full((ny, nx), np.inf, dtype=np.float64)
         self.HV2_max   = np.zeros((ny, nx), dtype=np.float64)
+        self.Fr_hv2    = np.zeros((ny, nx), dtype=np.float64)
 
         self.t               = 0.0
         self.n_steps         = 0
@@ -621,7 +627,7 @@ class DebrisFlowSolver2D:
 
             h, Qx, Qy = _lia_step(h, Qx, Qy, z, mv, dx, dy, dt, h_min, n2, Ke, ty, lim)
             _update_max(h, Qx, Qy, self.h_max, self.V_max, self.t_arrival, h_min, t_sim,
-                        self.HV2_max)
+                        self.HV2_max, self.Fr_hv2)
 
             t_sim += dt; self.n_steps += 1
             self.volume_history.append((t_sim, V))
@@ -653,6 +659,7 @@ class DebrisFlowSolver2D:
             total_inflow_vol=self._total_inflow_vol,
             initial_volume=self.volume_initial,
             HV2_max=self.HV2_max,
+            Fr_hv2=self.Fr_hv2,
         )
 
 
@@ -677,6 +684,12 @@ class SimulationResult:
     # unit width / ρm). Always ≤ h_max·V_max², which combines two separate envelopes
     # (e.g. front velocity with body depth) and is only an upper bound.
     HV2_max:          Optional[np.ndarray] = None
+    # Froude number V/√(g·h) at the moment of the peak momentum flux h·v² in each cell.
+    # The LIA agrees well with the full shallow-water equations only for Fr < 0.5, errors
+    # grow above (de Almeida & Bates 2013). A plain max_t(Fr) is useless as a diagnostic:
+    # it is set by thin films at the front (h ≈ h_min), where V/√(g·h) is huge; sampling
+    # Fr when h·v² peaks characterises the main body of the flow.
+    Fr_hv2:           Optional[np.ndarray] = None
 
     def max_inundation_area(self, h_threshold: float = 0.01) -> float:
         return np.sum(self.h_max > h_threshold) * self.terrain.dx * self.terrain.dy

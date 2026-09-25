@@ -392,6 +392,7 @@ class SimulationWorker(QThread):
                 "h_max":     (_thr(result.h_max),   True),
                 "V_max":     (result.V_max,          True),
                 "HV2_max":   (result.HV2_max,        True),
+                "Fr_hv2":    (result.Fr_hv2,         True),
                 "h_final":   (_thr(result.h_final),  True),
                 "t_arrival": (np.where(np.isinf(result.t_arrival),
                                        -9999.0, result.t_arrival), False),
@@ -407,6 +408,10 @@ class SimulationWorker(QThread):
                 paths[name] = path
                 self.log_message.emit(f"  Saved: {path}")
 
+            _w01 = result.h_max >= 0.1
+            _nw = max(int(_w01.sum()), 1)
+            fr05 = 100.0 * float(np.sum(result.Fr_hv2[_w01] > 0.5)) / _nw
+            fr1 = 100.0 * float(np.sum(result.Fr_hv2[_w01] > 1.0)) / _nw
             vb = result.volume_balance()
             self.log_message.emit(
                 f"\n── Summary ──\n"
@@ -414,6 +419,8 @@ class SimulationWorker(QThread):
                 f"  V_max peak:  {result.V_max.max():.3f} m/s\n"
                 f"  h·v² peak:   {result.HV2_max.max():.3f} m³/s² "
                 f"(h_max·V_max² would give {float(np.max(result.h_max * result.V_max**2)):.3f})\n"
+                f"  Fr at peak h·v²: > 0.5 on {fr05:.1f} %, > 1 on {fr1:.1f} % of the area with h_max ≥ 0.1 m\n"
+                f"               (LIA is outside its validity range there, de Almeida & Bates 2013)\n"
                 f"  Steps:       {result.n_steps}\n"
                 f"  Sim. time:   {result.t_simulated:.1f} s\n"
                 f"  Inflow vol.: {result.total_inflow_vol:.1f} m³\n"
@@ -1347,6 +1354,18 @@ class DebrisFlowDialog(QDialog):
             "envelopes (front velocity × body depth) and overestimates.")
         fl_l.addWidget(self.chk_HV2_max)
 
+        self.chk_Fr_hv2 = QCheckBox(
+            "Froude number at peak h·v²  (Fr_hv2)")
+        self.chk_Fr_hv2.setChecked(False)
+        self.chk_Fr_hv2.setToolTip(
+            "Fr = V/√(g·h) at the moment of the peak momentum flux h·v² in each cell.\n"
+            "Shows where the local inertial approximation (LIA) is used outside\n"
+            "its validity range: good agreement with the full equations only for\n"
+            "Fr < 0.5, growing errors above (de Almeida & Bates 2013).\n"
+            "Diagnostic only. A plain maximum of Fr is not used: it is set by the\n"
+            "thin film at the front and exceeds 1 almost everywhere.")
+        fl_l.addWidget(self.chk_Fr_hv2)
+
         self.chk_h_final = QCheckBox(
             "Final flow thickness  (h_final)")
         self.chk_h_final.setChecked(False)
@@ -2208,7 +2227,7 @@ class DebrisFlowDialog(QDialog):
                         alpha1, beta1, alpha2, beta2, manning_n },
             "solver": { t_end, dt_max },
             "output": { prefix, outdir,
-                        h_max, V_max, HV2_max, h_final, t_arrival,
+                        h_max, V_max, HV2_max, Fr_hv2, h_final, t_arrival,
                         threshold_enabled, threshold_value }
           }
         """
@@ -2282,6 +2301,7 @@ class DebrisFlowDialog(QDialog):
             "h_max":             self.chk_h_max.isChecked(),
             "V_max":             self.chk_V_max.isChecked(),
             "HV2_max":           self.chk_HV2_max.isChecked(),
+            "Fr_hv2":            self.chk_Fr_hv2.isChecked(),
             "h_final":           self.chk_h_final.isChecked(),
             "t_arrival":         self.chk_t_arrival.isChecked(),
             "threshold_enabled": self.chk_threshold.isChecked(),
@@ -2450,6 +2470,7 @@ class DebrisFlowDialog(QDialog):
             if "h_max"   in out: self.chk_h_max.setChecked(out["h_max"])
             if "V_max"   in out: self.chk_V_max.setChecked(out["V_max"])
             if "HV2_max" in out: self.chk_HV2_max.setChecked(out["HV2_max"])
+            if "Fr_hv2" in out: self.chk_Fr_hv2.setChecked(out["Fr_hv2"])
             if "h_final" in out: self.chk_h_final.setChecked(out["h_final"])
             if "t_arrival" in out: self.chk_t_arrival.setChecked(out["t_arrival"])
             thr_on  = out.get("threshold_enabled", False)
@@ -2688,6 +2709,7 @@ class DebrisFlowDialog(QDialog):
         if self.chk_h_max.isChecked():    wanted.add("h_max")
         if self.chk_V_max.isChecked():    wanted.add("V_max")
         if self.chk_HV2_max.isChecked():  wanted.add("HV2_max")
+        if self.chk_Fr_hv2.isChecked():   wanted.add("Fr_hv2")
         if self.chk_h_final.isChecked():  wanted.add("h_final")
         if self.chk_t_arrival.isChecked(): wanted.add("t_arrival")
 
@@ -2794,13 +2816,14 @@ class DebrisFlowDialog(QDialog):
             "h_max":     "Peak thickness",
             "V_max":     "Peak velocity",
             "HV2_max":   "Peak momentum flux h·v²",
+            "Fr_hv2":    "Froude number at peak h·v²",
             "h_final":   "Final deposits",
             "t_arrival": "Arrival time",
         }
 
         from .plugin import DebrisFlowPlugin
         lines = []
-        for key in ("h_max", "V_max", "HV2_max", "h_final", "t_arrival"):
+        for key in ("h_max", "V_max", "HV2_max", "Fr_hv2", "h_final", "t_arrival"):
             if key not in wanted:
                 continue
             name = f"{prefix}_{key}"
@@ -2809,7 +2832,8 @@ class DebrisFlowDialog(QDialog):
                 continue
             style = "velocity" if key == "V_max" else (
                     "intensity" if key == "HV2_max" else (
-                    "time"     if key == "t_arrival" else "depth"))
+                    "froude"   if key == "Fr_hv2" else (
+                    "time"     if key == "t_arrival" else "depth")))
             DebrisFlowPlugin.load_result_layer(path, name, style)
             lines.append(f"  • {name}  — {layer_names.get(key,'')}")
 

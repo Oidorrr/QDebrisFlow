@@ -392,6 +392,7 @@ class SimulationWorker(QThread):
                 "h_max":     (_thr(result.h_max),   True),
                 "V_max":     (result.V_max,          True),
                 "HV2_max":   (result.HV2_max,        True),
+                "Fr_hv2":    (result.Fr_hv2,         True),
                 "h_final":   (_thr(result.h_final),  True),
                 "t_arrival": (np.where(np.isinf(result.t_arrival),
                                        -9999.0, result.t_arrival), False),
@@ -407,6 +408,10 @@ class SimulationWorker(QThread):
                 paths[name] = path
                 self.log_message.emit(f"  Сохранён: {path}")
 
+            _w01 = result.h_max >= 0.1
+            _nw = max(int(_w01.sum()), 1)
+            fr05 = 100.0 * float(np.sum(result.Fr_hv2[_w01] > 0.5)) / _nw
+            fr1 = 100.0 * float(np.sum(result.Fr_hv2[_w01] > 1.0)) / _nw
             vb = result.volume_balance()
             self.log_message.emit(
                 f"\n── Итоги ──\n"
@@ -414,6 +419,8 @@ class SimulationWorker(QThread):
                 f"  V_max пик:  {result.V_max.max():.3f} м/с\n"
                 f"  h·v² пик:   {result.HV2_max.max():.3f} м³/с² "
                 f"(h_max·V_max² дало бы {float(np.max(result.h_max * result.V_max**2)):.3f})\n"
+                f"  Fr при пике h·v²: > 0.5 на {fr05:.1f} %, > 1 на {fr1:.1f} % площади с h_max ≥ 0.1 м\n"
+                f"              (там LIA вне области применимости, de Almeida & Bates 2013)\n"
                 f"  Шагов:      {result.n_steps}\n"
                 f"  Время сим.: {result.t_simulated:.1f} с\n"
                 f"  Введено:    {result.total_inflow_vol:.1f} м³\n"
@@ -1347,6 +1354,18 @@ class DebrisFlowDialog(QDialog):
             "(скорость фронта × глубина тела) и даёт завышенную оценку.")
         fl_l.addWidget(self.chk_HV2_max)
 
+        self.chk_Fr_hv2 = QCheckBox(
+            "Число Фруда при пике h·v²  (Fr_hv2)")
+        self.chk_Fr_hv2.setChecked(False)
+        self.chk_Fr_hv2.setToolTip(
+            "Fr = V/√(g·h) в момент пикового потока импульса h·v² в ячейке.\n"
+            "Показывает, где локально-инерционное приближение (LIA) работает\n"
+            "вне области применимости: хорошее согласие с полными уравнениями\n"
+            "лишь при Fr < 0.5, выше ошибки растут (de Almeida & Bates 2013).\n"
+            "Только диагностика. Простой максимум Fr не используется: его задаёт\n"
+            "тонкая плёнка на фронте, и он почти везде больше 1.")
+        fl_l.addWidget(self.chk_Fr_hv2)
+
         self.chk_h_final = QCheckBox(
             "Финальная толщина потока  (h_final)")
         self.chk_h_final.setChecked(False)
@@ -2208,7 +2227,7 @@ class DebrisFlowDialog(QDialog):
                         alpha1, beta1, alpha2, beta2, manning_n },
             "solver": { t_end, dt_max },
             "output": { prefix, outdir,
-                        h_max, V_max, HV2_max, h_final, t_arrival,
+                        h_max, V_max, HV2_max, Fr_hv2, h_final, t_arrival,
                         threshold_enabled, threshold_value }
           }
         """
@@ -2282,6 +2301,7 @@ class DebrisFlowDialog(QDialog):
             "h_max":             self.chk_h_max.isChecked(),
             "V_max":             self.chk_V_max.isChecked(),
             "HV2_max":           self.chk_HV2_max.isChecked(),
+            "Fr_hv2":            self.chk_Fr_hv2.isChecked(),
             "h_final":           self.chk_h_final.isChecked(),
             "t_arrival":         self.chk_t_arrival.isChecked(),
             "threshold_enabled": self.chk_threshold.isChecked(),
@@ -2450,6 +2470,7 @@ class DebrisFlowDialog(QDialog):
             if "h_max"   in out: self.chk_h_max.setChecked(out["h_max"])
             if "V_max"   in out: self.chk_V_max.setChecked(out["V_max"])
             if "HV2_max" in out: self.chk_HV2_max.setChecked(out["HV2_max"])
+            if "Fr_hv2" in out: self.chk_Fr_hv2.setChecked(out["Fr_hv2"])
             if "h_final" in out: self.chk_h_final.setChecked(out["h_final"])
             if "t_arrival" in out: self.chk_t_arrival.setChecked(out["t_arrival"])
             thr_on  = out.get("threshold_enabled", False)
@@ -2688,6 +2709,7 @@ class DebrisFlowDialog(QDialog):
         if self.chk_h_max.isChecked():    wanted.add("h_max")
         if self.chk_V_max.isChecked():    wanted.add("V_max")
         if self.chk_HV2_max.isChecked():  wanted.add("HV2_max")
+        if self.chk_Fr_hv2.isChecked():   wanted.add("Fr_hv2")
         if self.chk_h_final.isChecked():  wanted.add("h_final")
         if self.chk_t_arrival.isChecked(): wanted.add("t_arrival")
 
@@ -2794,13 +2816,14 @@ class DebrisFlowDialog(QDialog):
             "h_max":     "Пиковая толщина",
             "V_max":     "Пиковая скорость",
             "HV2_max":   "Пиковый поток импульса h·v²",
+            "Fr_hv2":    "Число Фруда при пике h·v²",
             "h_final":   "Финальные отложения",
             "t_arrival": "Время прихода",
         }
 
         from .plugin import DebrisFlowPlugin
         lines = []
-        for key in ("h_max", "V_max", "HV2_max", "h_final", "t_arrival"):
+        for key in ("h_max", "V_max", "HV2_max", "Fr_hv2", "h_final", "t_arrival"):
             if key not in wanted:
                 continue
             name = f"{prefix}_{key}"
@@ -2809,7 +2832,8 @@ class DebrisFlowDialog(QDialog):
                 continue
             style = "velocity" if key == "V_max" else (
                     "intensity" if key == "HV2_max" else (
-                    "time"     if key == "t_arrival" else "depth"))
+                    "froude"   if key == "Fr_hv2" else (
+                    "time"     if key == "t_arrival" else "depth")))
             DebrisFlowPlugin.load_result_layer(path, name, style)
             lines.append(f"  • {name}  — {layer_names.get(key,'')}")
 
