@@ -415,6 +415,7 @@ class SimulationWorker(QThread):
                 f"(h_max·V_max² дало бы {float(np.max(result.h_max * result.V_max**2)):.3f})\n"
                 f"  Шагов:      {result.n_steps}\n"
                 f"  Время сим.: {result.t_simulated:.1f} с\n"
+                f"  Введено:    {result.total_inflow_vol:.1f} м³\n"
                 f"  Δ масса:    {vb.get('V_loss_pct', float('nan')):.3f}%"
             )
 
@@ -537,6 +538,7 @@ class SweepWorker(QThread):
 
         # Импортируем sweep_runner ПОСЛЕ добавления plugin_dir в sys.path
         from core import sweep_runner as _sr
+        from core.solver import hydrograph_volume as _hydro_volume
 
         try:
             from qgis_runner import read_dem_array
@@ -573,17 +575,15 @@ class SweepWorker(QThread):
             # Базовый объём
             base_vol = 0.0
             for sc in src_cells:
-                t, q = sc["times"], sc["base_q_vals"]
-                finite = t < 1e8
-                if finite.sum() >= 2:
-                    _trapz = getattr(np, "trapezoid", None) or np.trapz
-                    base_vol += float(_trapz(q[finite], t[finite]))
+                # объём, реально вводимый на [0, t_end] (в т.ч. для постоянного Q)
+                base_vol += _hydro_volume(sc["times"], sc["base_q_vals"],
+                                          0.0, float(p["t_end"]))
             if base_vol <= 0:
                 self.sweep_error.emit(
                     "Базовый объём = 0. Проверьте гидрографы источников.")
                 return
             self.sweep_log.emit(
-                f"Базовый объём: {base_vol:.0f} м³ "
+                f"Базовый объём на [0, t_end]: {base_vol:.0f} м³ "
                 f"({len(src_cells)} источников)")
 
             # ── Наблюдаемая инундация ─────────────────────────────────────────
@@ -745,7 +745,7 @@ class SweepWorker(QThread):
                                 run_id=rid, status=f"error: {exc}",
                                 h_max=None,
                                 **{k: None for k in [
-                                    "vol_m3","tau_yield_Pa","eta_Pas","manning_n",
+                                    "vol_m3","vol_in_m3","tau_yield_Pa","eta_Pas","manning_n",
                                     "K_visc","h_max_m","wall_s","eta_min",
                                     "TP","FP","FN","omega_Tm",
                                     "delta_o_c","delta_u","Cm","depth_bias_m"]},
