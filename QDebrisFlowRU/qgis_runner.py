@@ -93,11 +93,22 @@ def _rasterise_gdal(source_layer, geo_info: dict, depth: float) -> np.ndarray:
     band = out_ds.GetRasterBand(1)
     band.Fill(0.0)
     band.SetNoDataValue(-9999.0)
-    src_path = source_layer.source().split("|")[0]
+    parts = source_layer.source().split("|")
+    src_path = parts[0]
     vec_ds = ogr.Open(src_path)
     if vec_ds is None:
         raise RuntimeError(f"OGR cannot open {src_path}")
-    vec_lyr = vec_ds.GetLayer()
+    # multi-layer sources (GeoPackage "|layername=…" / "|layerid=…"): take THAT layer,
+    # not the first one in the file
+    opts = dict(p.split("=", 1) for p in parts[1:] if "=" in p)
+    if "layername" in opts:
+        vec_lyr = vec_ds.GetLayerByName(opts["layername"])
+    elif "layerid" in opts:
+        vec_lyr = vec_ds.GetLayer(int(opts["layerid"]))
+    else:
+        vec_lyr = vec_ds.GetLayer()
+    if vec_lyr is None:
+        raise RuntimeError(f"OGR cannot find the layer in {source_layer.source()}")
     gdal.RasterizeLayer(out_ds, [1], vec_lyr, burn_values=[depth])
     h0 = band.ReadAsArray().astype(np.float64)
     out_ds = None

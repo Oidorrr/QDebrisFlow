@@ -36,7 +36,6 @@ from qgis.core import (QgsMapLayerProxyModel, QgsWkbTypes, QgsGeometry, QgsPoint
 from qgis.gui import QgsMapLayerComboBox
 
 _H_MIN = 0.005   # min. depth of a wet cell [m] — hidden from the user
-_CFL   = 0.40    # Courant number — hidden from the user
 
 
 # ─────────────────────────────────────────────────────────────────────────────
