@@ -226,6 +226,7 @@ def run_one_sample(args: dict) -> dict:
             run_id       = run_id,
             status       = "ok",
             vol_m3       = round(target_vol, 0),
+            vol_in_m3    = round(float(result.total_inflow_vol), 0),
             tau_yield_Pa = round(tau_y,  1),
             eta_Pas      = round(eta,    2),
             manning_n    = round(n_man,  4),
@@ -243,7 +244,7 @@ def run_one_sample(args: dict) -> dict:
 def _error_row(run_id: int, exc: Exception) -> dict:
     """Builds an error row (all numeric fields = None)."""
     null_keys = [
-        "vol_m3", "tau_yield_Pa", "eta_Pas", "manning_n", "K_visc",
+        "vol_m3", "vol_in_m3", "tau_yield_Pa", "eta_Pas", "manning_n", "K_visc",
         "h_max_m", "wall_s",
         "TP", "FP", "FN", "omega_Tm", "delta_o_c", "delta_u",
         "Cm", "depth_bias_m",

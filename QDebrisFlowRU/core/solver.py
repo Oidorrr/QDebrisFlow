@@ -87,6 +87,25 @@ class TerrainGrid:
 # InflowSource + SourceCondition + SimulationConfig
 # ─────────────────────────────────────────────────────────────────────────────
 
+def hydrograph_volume(times, q, t0: float, t1: float) -> float:
+    """
+    Точный объём [м³] кусочно-линейного гидрографа Q(t) между t0 и t1.
+    Q = 0 вне [times[0], times[-1]] — то же соглашение, что и в InflowSource.q_at.
+    """
+    times = np.asarray(times, dtype=np.float64)
+    q = np.asarray(q, dtype=np.float64)
+    if times.size < 2 or t1 <= t0:
+        return 0.0
+    a = max(t0, times[0])
+    b = min(t1, times[-1])
+    if b <= a:
+        return 0.0
+    inner = times[np.searchsorted(times, a, side="right"):np.searchsorted(times, b, side="left")]
+    tt = np.concatenate(([a], inner, [b]))
+    qq = np.interp(tt, times, q)
+    return float(np.sum(0.5 * (qq[1:] + qq[:-1]) * np.diff(tt)))
+
+
 @dataclass
 class InflowSource:
     """Одна зона притока с гидрографом Q(t) [м³/с]."""
@@ -98,6 +117,9 @@ class InflowSource:
 
     def q_at(self, t: float) -> float:
         return float(np.interp(t, self.times, self.q_total, left=0., right=0.))
+
+    def volume_between(self, t0: float, t1: float) -> float:
+        return hydrograph_volume(self.times, self.q_total, t0, t1)
 
     @property
     def n_cells(self) -> int:
@@ -567,11 +589,11 @@ class DebrisFlowSolver2D:
             dt = min(dt_cfl, dt_max)
             # CFL должно выполняться и для глубины, которую приток добавит за этот шаг (на
             # сухом домене dt_cfl = 1e9, и первый шаг иначе шёл бы с dt_max)
-            q_now = [src.q_at(t_sim) for src in self.source.inflow_sources]
-            for src, q_t in zip(self.source.inflow_sources, q_now):
-                if q_t > 0.:
+            for src in self.source.inflow_sources:
+                v_in = src.volume_between(t_sim, t_sim + dt)
+                if v_in > 0.:
                     h_src = (float(h[src.rows, src.cols].max())
-                             + q_t * dt / (src.n_cells * cell_area))
+                             + v_in / (src.n_cells * cell_area))
                     dt = min(dt, cfl * dmin / (GRAVITY * h_src)**0.5)
             if dt < dt_min:
                 raise RuntimeError(f"CFL шаг {dt:.6f} с < dt_min={dt_min} с")
@@ -579,10 +601,12 @@ class DebrisFlowSolver2D:
             # короче dt_min, чтобы точно выйти на t_end
             dt = min(dt, t_end - t_sim)
 
-            for src, q_t in zip(self.source.inflow_sources, q_now):
-                if q_t > 0.:
-                    rate = q_t / (src.n_cells * cell_area)
-                    self._total_inflow_vol += q_t * dt
+            # приток: точный объём кусочно-линейного Q(t) на [t, t+dt] (а не Q(t)·dt)
+            for src in self.source.inflow_sources:
+                v_in = src.volume_between(t_sim, t_sim + dt)
+                if v_in > 0.:
+                    rate = v_in / (dt * src.n_cells * cell_area)
+                    self._total_inflow_vol += v_in
                     if _NUMBA_AVAILABLE:
                         _add_inflow(h, src.rows.astype(np.int64),
                                     src.cols.astype(np.int64), rate, dt)
