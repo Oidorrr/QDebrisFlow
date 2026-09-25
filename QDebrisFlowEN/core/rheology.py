@@ -14,6 +14,12 @@ Mode 2 — EXPONENTIAL COEFFICIENTS (O'Brien & Julien 1988):
     τy = alpha1 × exp(beta1 × Cv)
     η  = alpha2 × exp(beta2 × Cv)
 
+    NB: FLO-2D and O'Brien & Julien (1988) use the opposite indices:
+        η = α1·exp(β1·Cv),  τy = α2·exp(β2·Cv).
+    The FLO-2D coefficient table carries only the footnote "1 Pa = 10 dynes/cm²;
+    1 Pa·s = 10 poises"; coefficients in dynes/cm² and poises must be × 0.1.
+    Default alpha/beta below: source not established (τy ≈ 0.8 Pa, η ≈ 26 Pa·s at Cv = 0.40).
+
 Switching: if tau_yield_direct > 0 → Mode 1, otherwise → Mode 2.
 """
 

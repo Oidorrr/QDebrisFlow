@@ -1199,22 +1199,37 @@ class DebrisFlowDialog(QDialog):
             "Для полевых условий используйте Режим 1.")
         warn.setStyleSheet("color:#B26A00;font-size:10px")
         fl_e.addRow(warn)
+        info = QLabel(
+            "τy = α₁·exp(β₁·Cv),  η = α₂·exp(β₂·Cv)  (в этом плагине).\n"
+            "В FLO-2D и O'Brien & Julien (1988) индексы обратные:\n"
+            "η = α₁·exp(β₁·Cv), τy = α₂·exp(β₂·Cv) — не переносите α₁/β₁ механически.\n"
+            "В таблице коэффициентов FLO-2D есть лишь сноска «1 Pa = 10 dynes/cm²;\n"
+            "1 Pa·s = 10 poises»: если ваши α в дин/см² и пуазах, умножьте их на 0.1.\n"
+            "Значения по умолчанию: источник не установлен; при Cv = 0.40 они дают\n"
+            "τy ≈ 0.8 Па и η ≈ 26 Па·с.")
+        info.setWordWrap(True)
+        info.setStyleSheet("color:#555;font-size:10px")
+        fl_e.addRow(info)
         self.spin_a1 = QDoubleSpinBox()
         self.spin_a1.setRange(0.0001,10); self.spin_a1.setValue(0.00423)
         self.spin_a1.setDecimals(5); self.spin_a1.setSingleStep(0.0001)
-        fl_e.addRow("α₁ [Па]:", self.spin_a1)
+        self.spin_a1.setToolTip("Коэффициент предела текучести: τy = α₁·exp(β₁·Cv) [Па]")
+        fl_e.addRow("α₁ (τy) [Па]:", self.spin_a1)
         self.spin_b1 = QDoubleSpinBox()
         self.spin_b1.setRange(1,30); self.spin_b1.setValue(13.11)
         self.spin_b1.setDecimals(2)
-        fl_e.addRow("β₁ [-]:", self.spin_b1)
+        self.spin_b1.setToolTip("Показатель β₁ для предела текучести (безразмерный)")
+        fl_e.addRow("β₁ (τy) [-]:", self.spin_b1)
         self.spin_a2 = QDoubleSpinBox()
         self.spin_a2.setRange(0.001,10); self.spin_a2.setValue(0.0311)
         self.spin_a2.setDecimals(4); self.spin_a2.setSingleStep(0.001)
-        fl_e.addRow("α₂ [Па·с]:", self.spin_a2)
+        self.spin_a2.setToolTip("Коэффициент вязкости: η = α₂·exp(β₂·Cv) [Па·с]")
+        fl_e.addRow("α₂ (η) [Па·с]:", self.spin_a2)
         self.spin_b2 = QDoubleSpinBox()
         self.spin_b2.setRange(1,40); self.spin_b2.setValue(16.81)
         self.spin_b2.setDecimals(2)
-        fl_e.addRow("β₂ [-]:", self.spin_b2)
+        self.spin_b2.setToolTip("Показатель β₂ для вязкости (безразмерный)")
+        fl_e.addRow("β₂ (η) [-]:", self.spin_b2)
         layout.addWidget(self._sec_exp)
 
         # Маннинг + K
