@@ -283,7 +283,7 @@ if _NUMBA_AVAILABLE:
             h[rows[k], cols[k]] += rate * dt
 
     @njit(cache=True, fastmath=True, nogil=True)
-    def _update_max(h, Qx, Qy, h_max, V_max, t_arrival, h_min, t):
+    def _update_max(h, Qx, Qy, h_max, V_max, t_arrival, h_min, t, HV2_max):
         ny, nx = h.shape[0], h.shape[1]
         nxm, nym = nx - 1, ny - 1
         for i in range(ny):
@@ -302,6 +302,8 @@ if _NUMBA_AVAILABLE:
                 elif i == ny-1 and nym > 0: qy = Qy[nym-1, j]
                 vm = min((qx*qx+qy*qy)**0.5/hd, 30.)
                 if vm > V_max[i, j]: V_max[i, j] = vm
+                hv2 = hv * vm * vm          # instantaneous h·v² [m³/s²]
+                if hv2 > HV2_max[i, j]: HV2_max[i, j] = hv2
                 if t_arrival[i, j] > 1e30: t_arrival[i, j] = t
 
 else:
@@ -373,7 +375,7 @@ else:
     def _add_inflow(h, rows, cols, rate, dt):
         h[rows, cols] += rate * dt
 
-    def _update_max(h, Qx, Qy, h_max, V_max, t_arrival, h_min, t):
+    def _update_max(h, Qx, Qy, h_max, V_max, t_arrival, h_min, t, HV2_max):
         np.maximum(h_max, h, out=h_max)
         ny, nx = h.shape
         hd = np.maximum(h, h_min)
@@ -383,6 +385,8 @@ else:
         Qyc[1:-1,:]=0.5*(Qy[:-1,:]+Qy[1:,:]); Qyc[0,:]=Qy[0,:]; Qyc[-1,:]=Qy[-1,:]
         vm = np.minimum(np.sqrt(Qxc**2+Qyc**2)/hd, 30.)
         np.maximum(V_max, vm, out=V_max)
+        hv2 = np.where(h >= h_min, h * vm**2, 0.)     # instantaneous h·v² [m³/s²]
+        np.maximum(HV2_max, hv2, out=HV2_max)
         t_arrival[(h >= h_min) & np.isinf(t_arrival)] = t
 
 
@@ -402,11 +406,12 @@ def warmup_jit(h_min: float = 0.005) -> float:
     hm = np.zeros((4,4),dtype=np.float64)
     vm = np.zeros((4,4),dtype=np.float64)
     ta = np.full((4,4), np.inf, dtype=np.float64)
+    hv = np.zeros((4,4),dtype=np.float64)
     r  = np.zeros(2, dtype=np.int64)
     c  = np.arange(2, dtype=np.int64)
     _lia_step(h,Qx,Qy,z,mv,10.,10.,1.,h_min,0.0036,1e-4,0.001)
     _cfl_vol_wet(h,mv,0.4,10.,10.,10.,h_min)
-    _update_max(h,Qx,Qy,hm,vm,ta,h_min,0.)
+    _update_max(h,Qx,Qy,hm,vm,ta,h_min,0.,hv)
     _add_inflow(h,r,c,0.1,1.0)
     return time.time()-t0
 
@@ -431,6 +436,7 @@ class DebrisFlowSolver2D:
         self.h_max     = np.zeros((ny, nx), dtype=np.float64)
         self.V_max     = np.zeros((ny, nx), dtype=np.float64)
         self.t_arrival = np.full((ny, nx), np.inf, dtype=np.float64)
+        self.HV2_max   = np.zeros((ny, nx), dtype=np.float64)
 
         self.t               = 0.0
         self.n_steps         = 0
@@ -523,7 +529,8 @@ class DebrisFlowSolver2D:
                         h[src.rows, src.cols] += rate * dt
 
             h, Qx, Qy = _lia_step(h, Qx, Qy, z, mv, dx, dy, dt, h_min, n2, Ke, ty)
-            _update_max(h, Qx, Qy, self.h_max, self.V_max, self.t_arrival, h_min, t_sim)
+            _update_max(h, Qx, Qy, self.h_max, self.V_max, self.t_arrival, h_min, t_sim,
+                        self.HV2_max)
 
             t_sim += dt; self.n_steps += 1
             self.volume_history.append((t_sim, V))
@@ -554,6 +561,7 @@ class DebrisFlowSolver2D:
             params=self.params, terrain=self.terrain,
             total_inflow_vol=self._total_inflow_vol,
             initial_volume=self.volume_initial,
+            HV2_max=self.HV2_max,
         )
 
 
@@ -574,6 +582,10 @@ class SimulationResult:
     terrain:          TerrainGrid
     total_inflow_vol: float = 0.0
     initial_volume:   float = 0.0
+    # max over time of the INSTANTANEOUS product h(t)·v(t)² [m³/s²] (momentum flux per
+    # unit width / ρm). Always ≤ h_max·V_max², which combines two separate envelopes
+    # (e.g. front velocity with body depth) and is only an upper bound.
+    HV2_max:          Optional[np.ndarray] = None
 
     def max_inundation_area(self, h_threshold: float = 0.01) -> float:
         return np.sum(self.h_max > h_threshold) * self.terrain.dx * self.terrain.dy
