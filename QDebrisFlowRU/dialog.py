@@ -531,6 +531,7 @@ class SimulationWorker(QThread):
                 cfl_number        = p.get("cfl_number", 0.60),
                 face_depth_limiter = p.get("face_depth_limiter", True),
                 theta             = p.get("theta", 1.0),
+                arrival_depth     = p.get("arrival_depth"),
                 cancel_check      = lambda: self._cancelled,
                 progress_callback = lambda tc, te: (
                     self.progress.emit(tc, te),
@@ -550,6 +551,13 @@ class SimulationWorker(QThread):
             # Применяем порог глубины если задан
             h_thr = p.get("h_threshold", 0.0)
 
+            def _mask_by_depth(arr):
+                if h_thr <= 0.0:
+                    return arr
+                out = arr.copy()
+                out[result.h_max < h_thr] = -9999.0
+                return out
+
             def _thr(arr):
                 if h_thr <= 0.0:
                     return arr
@@ -560,9 +568,9 @@ class SimulationWorker(QThread):
             # Полная карта: ключ → (массив, zero_as_nodata)
             all_outputs = {
                 "h_max":     (_thr(result.h_max),   True),
-                "V_max":     (result.V_max,          True),
-                "HV2_max":   (result.HV2_max,        True),
-                "Fr_hv2":    (result.Fr_hv2,         True),
+                "V_max":     (_mask_by_depth(result.V_max),   True),
+                "HV2_max":   (_mask_by_depth(result.HV2_max), True),
+                "Fr_hv2":    (_mask_by_depth(result.Fr_hv2),  True),
                 "h_final":   (_thr(result.h_final),  True),
                 "t_arrival": (np.where(np.isinf(result.t_arrival),
                                        -9999.0, result.t_arrival), False),
@@ -1669,6 +1677,19 @@ class DebrisFlowDialog(QDialog):
             "Момент времени [с] когда поток впервые достиг ячейки.\n"
             "Используется для планирования эвакуации.")
         fl_l.addWidget(self.chk_t_arrival)
+        arr_row = QHBoxLayout()
+        arr_row.addWidget(QLabel("   приход при глубине ≥"))
+        self.spin_arrival_thr = QDoubleSpinBox()
+        self.spin_arrival_thr.setRange(0.005, 5.0); self.spin_arrival_thr.setValue(0.005)
+        self.spin_arrival_thr.setDecimals(3); self.spin_arrival_thr.setSingleStep(0.05)
+        self.spin_arrival_thr.setSuffix(" м")
+        self.spin_arrival_thr.setToolTip(
+            "Глубина, при которой ячейка считается достигнутой для t_arrival.\n"
+            "0.005 м — мокрая плёнка 5 мм (прежнее поведение). Для карт опасности\n"
+            "часто полезнее значимая глубина (например, 0.1–0.3 м).\n"
+            "Задаётся до расчёта: t_arrival записывается во время моделирования.")
+        arr_row.addWidget(self.spin_arrival_thr); arr_row.addStretch()
+        fl_l.addLayout(arr_row)
 
         layout.addWidget(grp_layers)
 
@@ -1682,7 +1703,8 @@ class DebrisFlowDialog(QDialog):
         self.chk_threshold.setToolTip(
             "Если включено — ячейки с глубиной меньше порога\n"
             "записываются как NoData (прозрачные в QGIS).\n"
-            "Применяется к слоям h_max и h_final.")
+            "Применяется к слоям h_max и h_final; в V_max, h·v² и Fr\n"
+            "также скрываются ячейки, где h_max ниже порога.")
         self.chk_threshold.toggled.connect(
             lambda on: self.spin_threshold.setEnabled(on))
         fl_th.addRow(self.chk_threshold)
@@ -2617,6 +2639,7 @@ class DebrisFlowDialog(QDialog):
             "Fr_hv2":            self.chk_Fr_hv2.isChecked(),
             "h_final":           self.chk_h_final.isChecked(),
             "t_arrival":         self.chk_t_arrival.isChecked(),
+            "arrival_depth":     self.spin_arrival_thr.value(),
             "threshold_enabled": self.chk_threshold.isChecked(),
             "threshold_value":   self.spin_threshold.value(),
         }
@@ -2792,6 +2815,7 @@ class DebrisFlowDialog(QDialog):
             if "Fr_hv2" in out: self.chk_Fr_hv2.setChecked(out["Fr_hv2"])
             if "h_final" in out: self.chk_h_final.setChecked(out["h_final"])
             if "t_arrival" in out: self.chk_t_arrival.setChecked(out["t_arrival"])
+            if "arrival_depth" in out: self.spin_arrival_thr.setValue(float(out["arrival_depth"]))
             thr_on  = out.get("threshold_enabled", False)
             thr_val = out.get("threshold_value", 0.10)
             self.chk_threshold.setChecked(thr_on)
@@ -3129,6 +3153,7 @@ class DebrisFlowDialog(QDialog):
             "theta":            self.spin_theta.value(),
             "t_end":            float(self.spin_tend.value()),
             "dt_max":           self.spin_dtmax.value(),
+            "arrival_depth":    self.spin_arrival_thr.value(),
             "h_threshold":      (self.spin_threshold.value()
                                  if self.chk_threshold.isChecked() else 0.0),
         }

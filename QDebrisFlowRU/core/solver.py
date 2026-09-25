@@ -207,6 +207,8 @@ class SimulationConfig:
     theta: float = 1.0
     # вызывается раз за шаг; True останавливает расчёт исключением SimulationCancelled
     cancel_check: Optional[Callable[[], bool]] = None
+    # глубина [м], при которой ячейка считается достигнутой для t_arrival; None → h_min (плёнка 5 мм)
+    arrival_depth: Optional[float] = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -386,13 +388,14 @@ if _NUMBA_AVAILABLE:
             h[rows[k], cols[k]] += rate * dt
 
     @njit(cache=True, fastmath=True, nogil=True)
-    def _update_max(h, Qx, Qy, h_max, V_max, t_arrival, h_min, t, HV2_max, Fr_hv2):
+    def _update_max(h, Qx, Qy, h_max, V_max, t_arrival, h_min, t, HV2_max, Fr_hv2, h_arr):
         ny, nx = h.shape[0], h.shape[1]
         nxm, nym = nx - 1, ny - 1
         for i in range(ny):
             for j in range(nx):
                 hv = h[i, j]
                 if hv > h_max[i, j]: h_max[i, j] = hv
+                if hv >= h_arr and t_arrival[i, j] > 1e30: t_arrival[i, j] = t   # приход: первый момент, когда глубина достигла h_arr
                 if hv < h_min: continue
                 hd = hv if hv > h_min else h_min
                 qx = 0.
@@ -409,7 +412,6 @@ if _NUMBA_AVAILABLE:
                 if hv2 > HV2_max[i, j]:
                     HV2_max[i, j] = hv2
                     Fr_hv2[i, j] = vm / (9.81 * hd)**0.5   # число Фруда V/√(g·h) в момент пика h·v²
-                if t_arrival[i, j] > 1e30: t_arrival[i, j] = t
 
 else:
     # ── NumPy fallback ────────────────────────────────────────────────────────
@@ -515,7 +517,7 @@ else:
     def _add_inflow(h, rows, cols, rate, dt):
         h[rows, cols] += rate * dt
 
-    def _update_max(h, Qx, Qy, h_max, V_max, t_arrival, h_min, t, HV2_max, Fr_hv2):
+    def _update_max(h, Qx, Qy, h_max, V_max, t_arrival, h_min, t, HV2_max, Fr_hv2, h_arr):
         np.maximum(h_max, h, out=h_max)
         ny, nx = h.shape
         hd = np.maximum(h, h_min)
@@ -529,7 +531,7 @@ else:
         up = hv2 > HV2_max   # число Фруда V/√(g·h) в момент пика h·v²
         Fr_hv2[up] = (vm / np.sqrt(9.81 * hd))[up]
         np.maximum(HV2_max, hv2, out=HV2_max)
-        t_arrival[(h >= h_min) & np.isinf(t_arrival)] = t
+        t_arrival[(h >= h_arr) & np.isinf(t_arrival)] = t
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -554,7 +556,7 @@ def warmup_jit(h_min: float = 0.005) -> float:
     c  = np.arange(2, dtype=np.int64)
     _lia_step(h,Qx,Qy,z,mv,10.,10.,1.,h_min,0.0036,1e-4,0.001,True,0.8)
     _cfl_vol_wet(h,mv,0.4,10.,10.,10.,h_min)
-    _update_max(h,Qx,Qy,hm,vm,ta,h_min,0.,hv,fr)
+    _update_max(h,Qx,Qy,hm,vm,ta,h_min,0.,hv,fr,h_min)
     _add_inflow(h,r,c,0.1,1.0)
     return time.time()-t0
 
@@ -608,7 +610,9 @@ class DebrisFlowSolver2D:
         self.h[~self.terrain.mask_valid] = 0.
         np.copyto(self.h_max, self.h)
         self._h_init = self.h.copy()
-        self.t_arrival[self.h > self.params.h_min] = 0.
+        ad = self.config.arrival_depth
+        self._h_arr = self.params.h_min if ad is None else max(float(ad), self.params.h_min)
+        self.t_arrival[self.h > self._h_arr] = 0.
         # ячейки источника на nodata молча уничтожали бы введённый объём → отбрасываем их
         # и распределяем приток по оставшимся ячейкам того же источника
         self._sources = []
@@ -711,7 +715,7 @@ class DebrisFlowSolver2D:
 
             h, Qx, Qy = _lia_step(h, Qx, Qy, z, mv, dx, dy, dt, h_min, n2, Ke, ty, lim, theta)
             _update_max(h, Qx, Qy, self.h_max, self.V_max, self.t_arrival, h_min, t_sim + dt,
-                        self.HV2_max, self.Fr_hv2)
+                        self.HV2_max, self.Fr_hv2, self._h_arr)
 
             # объём на НАЧАЛО шага (до притока) → метка t_sim; пишется раз в output_interval
             # (запись на каждом шаге на длинных прогонах занимала бы гигабайты)
