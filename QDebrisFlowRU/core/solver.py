@@ -185,14 +185,16 @@ if _NUMBA_AVAILABLE:
                 q  = Qx[i, j]
                 vm = (q if q >= 0. else -q) / hf
                 # Маннинг (квадр.) и вязкость (лин.) — полунеявно в знаменатель (Bates 2010)
-                # τy/(γm·h) — явный импульс после шага 1 (O'Brien & Julien 1988)
                 sf = n2 * vm / hf**(4./3.) + K_eta_8gm / hf**2
                 d  = 1. + G * dt * sf
                 if d < 1.: d = 1.
-                q_star = (q - G * hf * dt * (eR - eL) / dx) / d
-                yi = G * dt * tau_gm          # τy-импульс = g·Δt·τy/γm [м²/с]
-                aq = q_star if q_star >= 0. else -q_star
-                Qx_new[i, j] = 0. if aq <= yi else q_star - (yi if q_star >= 0. else -yi)
+                # τy/(γm·h) из Sf FLO-2D: импульс текучести g·Δt·τy/γm [м²/с] вычитается
+                # в числителе, ДО деления на d, — тогда движение начинается при
+                # hf·|S| > τy/γm (= h_stop, см. rheology.h_stop) независимо от Δt, η, K
+                F  = q - G * hf * dt * (eR - eL) / dx
+                yi = G * dt * tau_gm
+                aF = F if F >= 0. else -F
+                Qx_new[i, j] = 0. if aF <= yi else (F - (yi if F >= 0. else -yi)) / d
 
         # Y-грани
         Qy_new = np.empty_like(Qy)
@@ -213,10 +215,10 @@ if _NUMBA_AVAILABLE:
                 sf = n2 * vm / hf**(4./3.) + K_eta_8gm / hf**2
                 d  = 1. + G * dt * sf
                 if d < 1.: d = 1.
-                q_star = (q - G * hf * dt * (eD - eU) / dy) / d
+                F  = q - G * hf * dt * (eD - eU) / dy
                 yi = G * dt * tau_gm
-                aq = q_star if q_star >= 0. else -q_star
-                Qy_new[i, j] = 0. if aq <= yi else q_star - (yi if q_star >= 0. else -yi)
+                aF = F if F >= 0. else -F
+                Qy_new[i, j] = 0. if aF <= yi else (F - (yi if F >= 0. else -yi)) / d
 
         # Ограничитель оттока — двухпроходная схема (идентична NumPy-бэкенду)
         # Проход 1: коэффициент sc для каждой ячейки
@@ -321,12 +323,12 @@ else:
         sf_x  = (n2 * vm_x / np.maximum(hf_x,1e-12)**(4./3.)
                  + K_eta_8gm / np.maximum(hf_x,1e-12)**2)
         denom_x = np.maximum(1. + G*dt*sf_x, 1.)
-        q_star_x = np.where(wet_x,
-                            (Qx - G*hf_x*dt*np.nan_to_num((eR-eL)/dx)) / denom_x, 0.)
-        # τy — явный импульс с ограничением инверсии знака (O'Brien & Julien 1988)
+        F_x = np.where(wet_x, Qx - G*hf_x*dt*np.nan_to_num((eR-eL)/dx), 0.)
+        # τy — импульс текучести вычитается в числителе до деления на denom
+        # (старт при hf·|S| > τy/γm независимо от Δt); без инверсии знака
         yield_impulse = G * dt * tau_gm
-        Qx_new = np.where(np.abs(q_star_x) > yield_impulse,
-                          q_star_x - yield_impulse * np.sign(q_star_x), 0.)
+        Qx_new = np.where(np.abs(F_x) > yield_impulse,
+                          (F_x - yield_impulse * np.sign(F_x)) / denom_x, 0.)
 
         # Y-грани
         eU, eD = eta[:-1, :], eta[1:, :]
@@ -339,10 +341,9 @@ else:
         sf_y  = (n2 * vm_y / np.maximum(hf_y,1e-12)**(4./3.)
                  + K_eta_8gm / np.maximum(hf_y,1e-12)**2)
         denom_y = np.maximum(1. + G*dt*sf_y, 1.)
-        q_star_y = np.where(wet_y,
-                            (Qy - G*hf_y*dt*np.nan_to_num((eD-eU)/dy)) / denom_y, 0.)
-        Qy_new = np.where(np.abs(q_star_y) > yield_impulse,
-                          q_star_y - yield_impulse * np.sign(q_star_y), 0.)
+        F_y = np.where(wet_y, Qy - G*hf_y*dt*np.nan_to_num((eD-eU)/dy), 0.)
+        Qy_new = np.where(np.abs(F_y) > yield_impulse,
+                          (F_y - yield_impulse * np.sign(F_y)) / denom_y, 0.)
 
         # Ограничитель оттока
         ox = np.zeros_like(h)
