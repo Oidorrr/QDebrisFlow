@@ -667,6 +667,7 @@ class DebrisFlowSolver2D:
         cell_area = dx * dy
 
         t_sim = 0.; t_last = 0.; ever_wet = False; t_wall = time.time()
+        inflow_done = False
 
         while t_sim < t_end:
 
@@ -710,6 +711,13 @@ class DebrisFlowSolver2D:
 
             if not ever_wet and wet > 0:
                 ever_wet = True
+
+            # all face discharges are exactly 0 and no inflow remains → the state is a fixed
+            # point (the yield test |F| ≤ g·Δt·τy/γm does not depend on Δt), so stop here
+            if not inflow_done:
+                inflow_done = all(s.volume_between(t_sim, t_end) <= 0. for s in self._sources)
+            if inflow_done and ever_wet and not Qx.any() and not Qy.any():
+                log.info(f"Flow at rest and no further inflow: stopped at t={t_sim:.1f} s"); break
 
             if t_sim - t_last >= out_iv:
                 self.h[:]=h; self.Qx[:]=Qx; self.Qy[:]=Qy
