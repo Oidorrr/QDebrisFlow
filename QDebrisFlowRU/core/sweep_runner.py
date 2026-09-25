@@ -233,6 +233,7 @@ def run_one_sample(args: dict) -> dict:
             manning_n    = round(n_man,  4),
             K_visc       = round(k_val,  1),
             h_max_m      = round(float(result.h_max.max()), 3),
+            edge_h_max_m = round(float(result.edge_h_max), 3),
             h_max        = result.h_max,        # для определения лучшего прогона
             wall_s       = round(wall_s, 1),
             **metrics,
@@ -246,7 +247,7 @@ def _error_row(run_id: int, exc: Exception) -> dict:
     """Формирует строку с ошибкой (все числовые поля = None)."""
     null_keys = [
         "vol_m3", "vol_in_m3", "tau_yield_Pa", "eta_Pas", "manning_n", "K_visc",
-        "h_max_m", "wall_s",
+        "h_max_m", "edge_h_max_m", "wall_s",
         "TP", "FP", "FN", "omega_Tm", "delta_o_c", "delta_u",
         "Cm", "depth_bias_m",
     ]

@@ -83,6 +83,24 @@ class TerrainGrid:
         return self._z
 
 
+def boundary_cells(mask_valid: np.ndarray) -> np.ndarray:
+    """
+    Valid cells on the domain boundary: the edge of the grid or next to a
+    nodata cell. All boundary faces are closed walls (no outflow), so flow
+    that reaches these cells accumulates there instead of leaving.
+    """
+    m = np.asarray(mask_valid, dtype=bool)
+    b = np.zeros_like(m)
+    b[0, :] = b[-1, :] = True
+    b[:, 0] = b[:, -1] = True
+    inv = ~m
+    b[1:, :] |= inv[:-1, :]
+    b[:-1, :] |= inv[1:, :]
+    b[:, 1:] |= inv[:, :-1]
+    b[:, :-1] |= inv[:, 1:]
+    return b & m
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # InflowSource + SourceCondition + SimulationConfig
 # ─────────────────────────────────────────────────────────────────────────────
@@ -647,6 +665,11 @@ class DebrisFlowSolver2D:
                 log.info(f"Flow stopped t={t_sim:.1f} s"); break
 
         self.h[:]=h; self.Qx[:]=Qx; self.Qy[:]=Qy; self.t=t_sim
+        bnd = boundary_cells(self.terrain.mask_valid)
+        edge_h_max = float(self.h_max[bnd].max()) if bnd.any() else 0.0
+        if edge_h_max >= h_min:
+            log.warning(f"Flow reached the closed domain boundary: h_max at the edge = "
+                        f"{edge_h_max:.3f} m — the fluid accumulates there instead of leaving")
         log.info(f"Completed [{backend}]: {self.n_steps} steps, "
                  f"{t_sim:.1f} s, {time.time()-t_wall:.2f} s CPU")
 
@@ -660,6 +683,7 @@ class DebrisFlowSolver2D:
             initial_volume=self.volume_initial,
             HV2_max=self.HV2_max,
             Fr_hv2=self.Fr_hv2,
+            edge_h_max=edge_h_max,
         )
 
 
@@ -690,6 +714,8 @@ class SimulationResult:
     # it is set by thin films at the front (h ≈ h_min), where V/√(g·h) is huge; sampling
     # Fr when h·v² peaks characterises the main body of the flow.
     Fr_hv2:           Optional[np.ndarray] = None
+    # max h_max over boundary cells (grid edge / next to nodata); > h_min → flow hit the wall
+    edge_h_max:       float = 0.0
 
     def max_inundation_area(self, h_threshold: float = 0.01) -> float:
         return np.sum(self.h_max > h_threshold) * self.terrain.dx * self.terrain.dy

@@ -426,6 +426,13 @@ class SimulationWorker(QThread):
                 f"  Inflow vol.: {result.total_inflow_vol:.1f} m³\n"
                 f"  Δ mass:      {vb.get('V_loss_pct', float('nan')):.3f}%"
             )
+            if result.edge_h_max >= _H_MIN:
+                self.log_message.emit(
+                    f"\n⚠ The flow reached the domain boundary (h_max at the edge = "
+                    f"{result.edge_h_max:.3f} m).\n"
+                    "  The boundary is a closed wall: the fluid accumulates there instead of\n"
+                    "  leaving, so h_max/h_final near the edge are overestimated.\n"
+                    "  Enlarge the DEM beyond the expected runout.")
 
             self.finished.emit({
                 "result":   result,
@@ -755,7 +762,7 @@ class SweepWorker(QThread):
                                 h_max=None,
                                 **{k: None for k in [
                                     "vol_m3","vol_in_m3","tau_yield_Pa","eta_Pas","manning_n",
-                                    "K_visc","h_max_m","wall_s","eta_min",
+                                    "K_visc","h_max_m","edge_h_max_m","wall_s","eta_min",
                                     "TP","FP","FN","omega_Tm",
                                     "delta_o_c","delta_u","Cm","depth_bias_m"]},
                             )

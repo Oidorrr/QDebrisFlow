@@ -426,6 +426,13 @@ class SimulationWorker(QThread):
                 f"  Введено:    {result.total_inflow_vol:.1f} м³\n"
                 f"  Δ масса:    {vb.get('V_loss_pct', float('nan')):.3f}%"
             )
+            if result.edge_h_max >= _H_MIN:
+                self.log_message.emit(
+                    f"\n⚠ Поток дошёл до границы домена (h_max на краю = "
+                    f"{result.edge_h_max:.3f} м).\n"
+                    "  Граница — непроницаемая стенка: жидкость накапливается у неё, а не\n"
+                    "  уходит, поэтому h_max/h_final у края завышены.\n"
+                    "  Расширьте ЦМР за пределы ожидаемой зоны выноса.")
 
             self.finished.emit({
                 "result":   result,
@@ -755,7 +762,7 @@ class SweepWorker(QThread):
                                 h_max=None,
                                 **{k: None for k in [
                                     "vol_m3","vol_in_m3","tau_yield_Pa","eta_Pas","manning_n",
-                                    "K_visc","h_max_m","wall_s","eta_min",
+                                    "K_visc","h_max_m","edge_h_max_m","wall_s","eta_min",
                                     "TP","FP","FN","omega_Tm",
                                     "delta_o_c","delta_u","Cm","depth_bias_m"]},
                             )
