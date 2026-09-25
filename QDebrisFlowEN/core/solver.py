@@ -176,6 +176,11 @@ class SimulationConfig:
     cfl_number:        float    = 0.5
     output_interval:   float    = 60.0
     progress_callback: Optional[Callable[[float, float], None]] = None
+    # Face-depth limiter hf ≤ ½(hL+hR). Earlier attributed to Almeida et al. (2012), eq. 2,
+    # but this formula is not found in the published restatements of that paper; its
+    # source is unconfirmed. It slows wetting fronts (test fan: arrival +7…16 %) and
+    # amplifies channel pulsations. ON by default = behaviour of the published runs.
+    face_depth_limiter: bool = True
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -185,7 +190,7 @@ class SimulationConfig:
 if _NUMBA_AVAILABLE:
 
     @njit(cache=True, fastmath=True, nogil=True)
-    def _lia_step(h, Qx, Qy, z, mask, dx, dy, dt, h_min, n2, K_eta_8gm, tau_gm):
+    def _lia_step(h, Qx, Qy, z, mask, dx, dy, dt, h_min, n2, K_eta_8gm, tau_gm, lim):
         G = 9.81
         ny, nx = h.shape[0], h.shape[1]
         nxm, nym = nx - 1, ny - 1
@@ -205,7 +210,7 @@ if _NUMBA_AVAILABLE:
                 hf = (eL if eL > eR else eR) - (z[i,j] if z[i,j] > z[i,j+1] else z[i,j+1])
                 if hf != hf or hf <= h_min:
                     continue
-                hf = min(hf, 0.5*(h[i, j] + h[i, j+1]))   # limiter Almeida et al. (2012), eq. 2
+                if lim: hf = min(hf, 0.5*(h[i, j] + h[i, j+1]))   # optional limiter hf ≤ ½(hL+hR), see SimulationConfig.face_depth_limiter
                 if hf <= h_min:
                     continue
                 q  = Qx[i, j]
@@ -231,7 +236,7 @@ if _NUMBA_AVAILABLE:
                 hf = (eU if eU > eD else eD) - (z[i,j] if z[i,j] > z[i+1,j] else z[i+1,j])
                 if hf != hf or hf <= h_min:
                     continue
-                hf = min(hf, 0.5*(h[i, j] + h[i+1, j]))
+                if lim: hf = min(hf, 0.5*(h[i, j] + h[i+1, j]))
                 if hf <= h_min:
                     continue
                 q  = Qy[i, j]
@@ -377,7 +382,7 @@ else:
         P = np.zeros((A.shape[0], A.shape[1] + 2)); P[:, 1:-1] = A
         return 0.25 * (P[:-1, :-1] + P[:-1, 1:] + P[1:, :-1] + P[1:, 1:])
 
-    def _lia_step(h, Qx, Qy, z, mask, dx, dy, dt, h_min, n2, K_eta_8gm, tau_gm):
+    def _lia_step(h, Qx, Qy, z, mask, dx, dy, dt, h_min, n2, K_eta_8gm, tau_gm, lim):
         G  = 9.81
         mv = mask
         eta = z + h
@@ -387,7 +392,7 @@ else:
         hf_x = np.maximum(np.nan_to_num(
             np.maximum(eL, eR) - np.maximum(z[:,:-1], z[:,1:]),
             nan=0., posinf=0.), 0.)
-        hf_x = np.minimum(hf_x, 0.5*(h[:,:-1]+h[:,1:]))           # limiter Almeida et al. (2012)
+        if lim: hf_x = np.minimum(hf_x, 0.5*(h[:,:-1]+h[:,1:]))   # optional limiter, see SimulationConfig.face_depth_limiter
         wet_x = (hf_x > h_min) & mv[:, :-1] & mv[:, 1:]
 
         # Y-faces
@@ -395,7 +400,7 @@ else:
         hf_y = np.maximum(np.nan_to_num(
             np.maximum(eU, eD) - np.maximum(z[:-1,:], z[1:,:]),
             nan=0., posinf=0.), 0.)
-        hf_y = np.minimum(hf_y, 0.5*(h[:-1,:]+h[1:,:]))
+        if lim: hf_y = np.minimum(hf_y, 0.5*(h[:-1,:]+h[1:,:]))
         wet_y = (hf_y > h_min) & mv[:-1,:] & mv[1:,:]
 
         # Coupled friction (Cozzolino et al. 2021, eqs. 19-21): |q| includes the transverse
@@ -482,7 +487,7 @@ def warmup_jit(h_min: float = 0.005) -> float:
     hv = np.zeros((4,4),dtype=np.float64)
     r  = np.zeros(2, dtype=np.int64)
     c  = np.arange(2, dtype=np.int64)
-    _lia_step(h,Qx,Qy,z,mv,10.,10.,1.,h_min,0.0036,1e-4,0.001)
+    _lia_step(h,Qx,Qy,z,mv,10.,10.,1.,h_min,0.0036,1e-4,0.001,True)
     _cfl_vol_wet(h,mv,0.4,10.,10.,10.,h_min)
     _update_max(h,Qx,Qy,hm,vm,ta,h_min,0.,hv)
     _add_inflow(h,r,c,0.1,1.0)
@@ -577,6 +582,7 @@ class DebrisFlowSolver2D:
         h_min  = self.params.h_min
         n2     = self._n2; Ke = self._K_eta_8gm; ty = self._tau_gm
         cfl    = self.config.cfl_number; dmin = self._dx_min
+        lim    = bool(self.config.face_depth_limiter)
         dt_max = self.config.dt_max; dt_min = self.config.dt_min
         t_end  = self.config.t_end; out_iv = self.config.output_interval
         cell_area = dx * dy
@@ -613,7 +619,7 @@ class DebrisFlowSolver2D:
                     else:
                         h[src.rows, src.cols] += rate * dt
 
-            h, Qx, Qy = _lia_step(h, Qx, Qy, z, mv, dx, dy, dt, h_min, n2, Ke, ty)
+            h, Qx, Qy = _lia_step(h, Qx, Qy, z, mv, dx, dy, dt, h_min, n2, Ke, ty, lim)
             _update_max(h, Qx, Qy, self.h_max, self.V_max, self.t_arrival, h_min, t_sim,
                         self.HV2_max)
 

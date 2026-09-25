@@ -361,6 +361,7 @@ class SimulationWorker(QThread):
                 t_end             = p["t_end"],
                 dt_max            = p["dt_max"],
                 cfl_number        = p.get("cfl_number", 0.60),
+                face_depth_limiter = p.get("face_depth_limiter", True),
                 progress_callback = lambda tc, te: (
                     self.progress.emit(tc, te),
                     self.log_message.emit(f"  t = {tc:.0f} с / {te:.0f} с")
@@ -642,6 +643,7 @@ class SweepWorker(QThread):
                 t_end           = p["t_end"],
                 dt_max          = p["dt_max"],
                 cfl_number      = p.get("cfl_number", 0.60),
+                face_depth_limiter = p.get("face_depth_limiter", True),
                 depth_threshold = p["depth_threshold"],
             )
 
@@ -1272,6 +1274,16 @@ class DebrisFlowDialog(QDialog):
             "  > 0.70    — только при плоском рельефе, с осторожностью.\n\n"
             "При CFL > 0.9 возможна числовая неустойчивость.")
         layout.addRow("Число CFL:", self.spin_cfl)
+
+        self.chk_face_lim = QCheckBox("Ограничитель глубины на грани  hf ≤ ½(hL+hR)")
+        self.chk_face_lim.setChecked(True)
+        self.chk_face_lim.setToolTip(
+            "Ограничивает глубину потока на грани средним глубин двух ячеек.\n"
+            "Замедляет фронт на сухом склоне (тестовый конус: время добегания +7…16 %)\n"
+            "и усиливает пульсации в крутом русле.\n"
+            "Источник формулы не подтверждён (её приписывали\n"
+            "Almeida et al. 2012, ур. 2). Включён по умолчанию — как в опубликованных расчётах.")
+        layout.addRow(self.chk_face_lim)
 
         lbl = QLabel(
             "<i>h_min = 5 мм зафиксирован автоматически для устойчивости LIA.</i>")
@@ -2023,6 +2035,7 @@ class DebrisFlowDialog(QDialog):
             csv_name        = (self.edit_sweep_csv.text().strip()
                                or "sweep_results.csv"),
             cfl_number      = self.spin_cfl.value(),
+            face_depth_limiter = self.chk_face_lim.isChecked(),
             n_workers       = self.spin_n_workers.value(),
             rho_s           = self.spin_rho_s.value(),
             rho_w           = self.spin_rho_w.value(),
@@ -2259,6 +2272,7 @@ class DebrisFlowDialog(QDialog):
         solver_sec = {
             "t_end":  self.spin_tend.value(),
             "dt_max": self.spin_dtmax.value(),
+            "face_depth_limiter": self.chk_face_lim.isChecked(),
         }
 
         # --- Output ---
@@ -2425,6 +2439,8 @@ class DebrisFlowDialog(QDialog):
         if sv:
             if "t_end"  in sv: self.spin_tend.setValue(int(sv["t_end"]))
             if "dt_max" in sv: self.spin_dtmax.setValue(sv["dt_max"])
+            if "face_depth_limiter" in sv:
+                self.chk_face_lim.setChecked(bool(sv["face_depth_limiter"]))
 
         # --- Output ---
         out = data.get("output", {})
@@ -2732,6 +2748,7 @@ class DebrisFlowDialog(QDialog):
             "manning_n":        self.spin_n.value(),
             "K_visc":           self.spin_K.value(),
             "cfl_number":       self.spin_cfl.value(),
+            "face_depth_limiter": self.chk_face_lim.isChecked(),
             "t_end":            float(self.spin_tend.value()),
             "dt_max":           self.spin_dtmax.value(),
             "h_threshold":      (self.spin_threshold.value()
