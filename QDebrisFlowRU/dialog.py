@@ -99,6 +99,31 @@ def _volume_residuals(log_v, cm) -> np.ndarray:
     return cm - A @ coef + cm.mean()
 
 
+def _read_hydrograph_csv(path: str):
+    """Читает (время [с], Q [м³/с]) из CSV/текстового файла: разделитель ',', ';', табуляция
+    или пробелы; с ';', табуляцией и пробелами допускается десятичная запятая; строка
+    заголовка пропускается."""
+    with open(path, encoding="utf-8-sig", errors="replace") as f:
+        lines = [ln.strip() for ln in f if ln.strip()]
+    sample = "\n".join(lines[:20])
+    delim = ";" if ";" in sample else ("\t" if "\t" in sample else ("," if "," in sample else None))
+    times, qs = [], []
+    for k, line in enumerate(lines):
+        parts = line.split(delim) if delim else line.split()
+        if delim != ",":
+            parts = [s.strip().replace(",", ".") for s in parts]
+        try:
+            t, q = float(parts[0]), float(parts[1])
+        except (ValueError, IndexError):
+            if not times:              # header line(s)
+                continue
+            raise ValueError(f"строка {k + 1}: ожидались два числа, получено {line!r}")
+        times.append(t); qs.append(q)
+    if len(times) < 2:
+        raise ValueError("меньше двух строк с числами")
+    return times, qs
+
+
 
 def _to_dem_crs(geom, src_crs, dem_crs):
     """Копия геометрии, перепроецированная из src_crs в CRS ЦМР (если CRS совпадают — без изменений)."""
@@ -260,11 +285,9 @@ class HydrographEditorDialog(QDialog):
         if not fname:
             return
         try:
-            data = np.loadtxt(fname, delimiter=",", skiprows=1)
-            if data.ndim == 1:
-                data = data.reshape(-1, 2)
-            self.table.setRowCount(len(data))
-            for i, (t, q) in enumerate(data[:, :2]):
+            times, qs = _read_hydrograph_csv(fname)
+            self.table.setRowCount(len(times))
+            for i, (t, q) in enumerate(zip(times, qs)):
                 self.table.setItem(i, 0, QTableWidgetItem(f"{t:.1f}"))
                 self.table.setItem(i, 1, QTableWidgetItem(f"{q:.3f}"))
             self.lbl_csv.setText(os.path.basename(fname))
@@ -304,17 +327,28 @@ class HydrographEditorDialog(QDialog):
             return {"type": "const", "q_const": q,
                     "times": [0.0, 1e9], "q_vals": [q, q]}
         # Таблица / CSV
-        times, q_vals = [], []
+        rows, bad = [], []
         for i in range(self.table.rowCount()):
             ti = self.table.item(i, 0)
             qi = self.table.item(i, 1)
-            if ti is None or qi is None or not ti.text() or not qi.text():
+            if ti is None or qi is None or not ti.text().strip() or not qi.text().strip():
                 continue
             try:
-                times.append(float(ti.text()))
-                q_vals.append(float(qi.text()))
+                rows.append((float(ti.text().strip().replace(",", ".")),
+                             float(qi.text().strip().replace(",", "."))))
             except ValueError:
-                pass
+                bad.append(i + 1)
+        if bad:
+            raise ValueError(f"Строки {bad}: не число (цифры, например 12.5 или 12,5).")
+        if any(q < 0 for _, q in rows):
+            raise ValueError("Расход Q не может быть отрицательным.")
+        if any(t < 0 for t, _ in rows):
+            raise ValueError("Время не может быть отрицательным.")
+        rows.sort(key=lambda r: r[0])          # np.interp needs increasing times
+        times = [r[0] for r in rows]
+        q_vals = [r[1] for r in rows]
+        if any(b <= a for a, b in zip(times, times[1:])):
+            raise ValueError("В двух строках одинаковое время — времена должны различаться.")
         if len(times) < 2:
             raise ValueError(
                 "Нужно минимум 2 строки с числами.\n"
@@ -357,7 +391,7 @@ class SimulationWorker(QThread):
             from core.rheology import OBrienParameters
             from core.solver   import (TerrainGrid, SimulationConfig,
                                         SourceCondition, InflowSource,
-                                        DebrisFlowSolver2D)
+                                        DebrisFlowSolver2D, hydrograph_volume)
             from qgis_runner   import read_dem_array, write_geotiff
 
             p = self.params
@@ -396,6 +430,11 @@ class SimulationWorker(QThread):
                     f"    ✓ {len(rows)} ячеек, "
                     f"Q_max={max(src_info['q_vals']):.1f} м³/с")
 
+                if max(src_info["times"]) < 1e8:      # not a constant hydrograph
+                    _beyond = hydrograph_volume(src_info["times"], src_info["q_vals"],
+                                                p["t_end"], 1e12)
+                    if _beyond > 0:
+                        self.log_message.emit(f"    ⚠ {_beyond:.0f} м³ этого гидрографа приходятся на время после t_end и не будут введены.")
                 inflow_sources.append(InflowSource(
                     rows    = rows,
                     cols    = cols,
@@ -681,6 +720,11 @@ class SweepWorker(QThread):
             # Базовый объём
             base_vol = 0.0
             for sc in src_cells:
+                if float(np.max(sc["times"])) < 1e8:
+                    _beyond = _hydro_volume(sc["times"], sc["base_q_vals"],
+                                            float(p["t_end"]), 1e12)
+                    if _beyond > 0:
+                        self.sweep_log.emit(f"⚠ Источник {sc['name']}: {_beyond:.0f} м³ после t_end не вводятся.")
                 # объём, реально вводимый на [0, t_end] (в т.ч. для постоянного Q)
                 base_vol += _hydro_volume(sc["times"], sc["base_q_vals"],
                                           0.0, float(p["t_end"]))
@@ -1117,14 +1161,15 @@ class DebrisFlowDialog(QDialog):
         lay_src.addWidget(info_lbl)
 
         self.tbl_sources = QTableWidget()
-        self.tbl_sources.setColumnCount(4)
+        self.tbl_sources.setColumnCount(5)
         self.tbl_sources.setHorizontalHeaderLabels(
-            ["ID", "Описание", "Q_max (м³/с)", "Гидрограф"])
+            ["ID", "Описание", "Q_max (м³/с)", "V до t_end (м³)", "Гидрограф"])
         hdr = self.tbl_sources.horizontalHeader()
         hdr.setSectionResizeMode(0, QHeaderView.ResizeToContents)
         hdr.setSectionResizeMode(1, QHeaderView.Stretch)
         hdr.setSectionResizeMode(2, QHeaderView.ResizeToContents)
         hdr.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        hdr.setSectionResizeMode(4, QHeaderView.ResizeToContents)
         self.tbl_sources.setSelectionBehavior(QTableWidget.SelectRows)
         self.tbl_sources.setEditTriggers(QTableWidget.NoEditTriggers)
         self.tbl_sources.setMinimumHeight(160)
@@ -1374,6 +1419,7 @@ class DebrisFlowDialog(QDialog):
 
         self.spin_tend = QSpinBox()
         self.spin_tend.setRange(60, 86400); self.spin_tend.setValue(3600)
+        self.spin_tend.valueChanged.connect(lambda _v: self._refresh_volumes())
         self.spin_tend.setSuffix(" с")
         layout.addRow("Длительность симуляции:", self.spin_tend)
 
@@ -2592,8 +2638,9 @@ class DebrisFlowDialog(QDialog):
                 btn.setProperty("fname", fname)
                 btn.setProperty("row",   row)
                 btn.clicked.connect(self._edit_hydro)
-                self.tbl_sources.setCellWidget(row, 3, btn)
+                self.tbl_sources.setCellWidget(row, 4, btn)
 
+            self._refresh_volumes()
             self.tbl_sources.resizeRowsToContents()
 
         # --- O'Brien ---
@@ -2721,7 +2768,7 @@ class DebrisFlowDialog(QDialog):
             btn.setProperty("fname", fname)
             btn.setProperty("row", row)
             btn.clicked.connect(self._edit_hydro)
-            self.tbl_sources.setCellWidget(row, 3, btn)
+            self.tbl_sources.setCellWidget(row, 4, btn)
 
             # Если для этого fid нет данных — устанавливаем дефолт
             if fid not in self._hydro_data:
@@ -2730,7 +2777,32 @@ class DebrisFlowDialog(QDialog):
                     "times": [0.0, 1e9], "q_vals": [100.0, 100.0],
                 }
 
+        self._refresh_volumes()
         self.tbl_sources.resizeRowsToContents()
+
+    def _refresh_volumes(self):
+        """Объём каждого гидрографа, вводимый на [0, t_end] (столбец 3)."""
+        from .core.solver import hydrograph_volume
+        t_end = float(self.spin_tend.value()) if hasattr(self, "spin_tend") else 0.0
+        for row in range(self.tbl_sources.rowCount()):
+            it = self.tbl_sources.item(row, 0)
+            try:
+                fid = int(it.text()) if it is not None else None
+            except ValueError:
+                fid = None
+            data = self._hydro_data.get(fid) if fid is not None else None
+            txt, after = "—", 0.0
+            if data:
+                v = hydrograph_volume(data["times"], data["q_vals"], 0.0, t_end)
+                if data.get("type") != "const":
+                    after = hydrograph_volume(data["times"], data["q_vals"], t_end, 1e12)
+                txt = f"{v:.0f}" + (" ⚠" if after > 0 else "")
+            item = QTableWidgetItem(txt)
+            item.setTextAlignment(Qt.AlignCenter)
+            item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+            item.setToolTip("Объём, вводимый на [0, t_end]; ⚠ — часть гидрографа лежит после t_end\n"
+                        "и не будет введена (увеличьте длительность симуляции).")
+            self.tbl_sources.setItem(row, 3, item)
 
     def _edit_hydro(self):
         """Открыть редактор гидрографа для выбранного объекта."""
@@ -2750,6 +2822,7 @@ class DebrisFlowDialog(QDialog):
                 item = self.tbl_sources.item(row, 2)
                 if item:
                     item.setText(f"{q_max:.1f}")
+                self._refresh_volumes()
 
     def _on_rheo_mode(self):
         direct = self._radio_direct.isChecked()
