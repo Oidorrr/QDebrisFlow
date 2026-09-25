@@ -1840,6 +1840,8 @@ class DebrisFlowDialog(QDialog):
             "Numeric attribute of the point layer containing\n"
             "the peak flow depth value [m].")
         fl_obs.addRow("Depth field [m]:", self.combo_depth_field)
+        # the point combo may already hold a layer (picked before layerChanged was connected)
+        self._on_obs_pts_changed(self.combo_obs_pts.currentLayer())
 
         self.spin_depth_thr = QDoubleSpinBox()
         self.spin_depth_thr.setRange(0.01, 5.0)

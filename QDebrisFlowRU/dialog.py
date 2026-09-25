@@ -1841,6 +1841,8 @@ class DebrisFlowDialog(QDialog):
             "Числовой атрибут точечного слоя, содержащий\n"
             "значение пиковой глубины потока [м].")
         fl_obs.addRow("Поле глубины [м]:", self.combo_depth_field)
+        # комбобокс точек мог уже выбрать слой до подключения layerChanged
+        self._on_obs_pts_changed(self.combo_obs_pts.currentLayer())
 
         self.spin_depth_thr = QDoubleSpinBox()
         self.spin_depth_thr.setRange(0.01, 5.0)
