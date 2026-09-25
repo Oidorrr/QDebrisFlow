@@ -204,6 +204,8 @@ class SimulationConfig:
     # oscillations in steep low-friction channels. 1.0 = original Bates et al. (2010)
     # scheme = behaviour of the published runs; Landlab uses 0.8 by default.
     theta: float = 1.0
+    # called once per time step; returning True stops the run with SimulationCancelled
+    cancel_check: Optional[Callable[[], bool]] = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -560,6 +562,10 @@ def warmup_jit(h_min: float = 0.005) -> float:
 # Main solver
 # ─────────────────────────────────────────────────────────────────────────────
 
+class SimulationCancelled(RuntimeError):
+    """Raised by DebrisFlowSolver2D.run when SimulationConfig.cancel_check() returns True."""
+
+
 class DebrisFlowSolver2D:
 
     def __init__(self, terrain, params, source, config):
@@ -668,8 +674,11 @@ class DebrisFlowSolver2D:
 
         t_sim = 0.; t_last = 0.; ever_wet = False; t_wall = time.time()
         inflow_done = False
+        cancel = self.config.cancel_check
 
         while t_sim < t_end:
+            if cancel is not None and cancel():
+                raise SimulationCancelled(f"cancelled by the user at t = {t_sim:.1f} s")
 
             dt_cfl, V, wet = _cfl_vol_wet(h, mv, cfl, dmin, dx, dy, h_min)
             dt = min(dt_cfl, dt_max)

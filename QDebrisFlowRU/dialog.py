@@ -285,10 +285,15 @@ class SimulationWorker(QThread):
     log_message = pyqtSignal(str)
     finished    = pyqtSignal(object)
     error       = pyqtSignal(str)
+    cancelled   = pyqtSignal()
 
     def __init__(self, params: dict):
         super().__init__()
         self.params = params
+        self._cancelled = False
+
+    def cancel(self):
+        self._cancelled = True
 
     # ── Главный метод потока ──────────────────────────────────────────────────
 
@@ -393,6 +398,7 @@ class SimulationWorker(QThread):
                 cfl_number        = p.get("cfl_number", 0.60),
                 face_depth_limiter = p.get("face_depth_limiter", True),
                 theta             = p.get("theta", 1.0),
+                cancel_check      = lambda: self._cancelled,
                 progress_callback = lambda tc, te: (
                     self.progress.emit(tc, te),
                     self.log_message.emit(f"  t = {tc:.0f} с / {te:.0f} с")
@@ -480,6 +486,10 @@ class SimulationWorker(QThread):
             })
 
         except Exception as e:
+            if type(e).__name__ == "SimulationCancelled":
+                self.log_message.emit("\n⚠ Расчёт остановлен пользователем.")
+                self.cancelled.emit()
+                return
             self.error.emit(f"{type(e).__name__}: {e}\n\n{traceback.format_exc()}")
 
     # ── Растеризация одного объекта ───────────────────────────────────────────
@@ -685,6 +695,7 @@ class SweepWorker(QThread):
 
             job_base = dict(
                 plugin_dir      = plugin_dir,
+                cancel_check    = (lambda: self._cancelled),
                 dem             = dem,
                 geo_info        = _geo_serial,   # только примитивы → picklable
                 src_cells       = src_cells,
@@ -1030,6 +1041,11 @@ class DebrisFlowDialog(QDialog):
         btn_close = QPushButton("Закрыть")
         btn_close.clicked.connect(self.close)
         btns.addWidget(self.btn_run)
+        self.btn_stop = QPushButton("⏹  Стоп")
+        self.btn_stop.setToolTip("Остановить идущий расчёт на ближайшем шаге по времени.")
+        self.btn_stop.setEnabled(False)
+        self.btn_stop.clicked.connect(self._on_stop)
+        btns.addWidget(self.btn_stop)
         btns.addWidget(btn_close)
         main.addLayout(btns)
 
@@ -2011,7 +2027,7 @@ class DebrisFlowDialog(QDialog):
         if self.sweep_worker and self.sweep_worker.isRunning():
             self.sweep_worker.cancel()
             self.sweep_log_box.append(
-                "⚠ Отмена — ожидание завершения текущего прогона...")
+                "⚠ Отмена — идущие прогоны остановятся на ближайшем шаге...")
             self.btn_sweep_cancel.setEnabled(False)
 
     def _on_sweep_run(self):
@@ -2899,7 +2915,21 @@ class DebrisFlowDialog(QDialog):
         self.worker.log_message.connect(self._on_log)
         self.worker.finished.connect(self._on_finished)
         self.worker.error.connect(self._on_error)
+        self.worker.cancelled.connect(self._on_cancelled)
         self.worker.start()
+        self.btn_stop.setEnabled(True)
+
+    def _on_stop(self):
+        if self.worker is not None and self.worker.isRunning():
+            self.worker.cancel()
+            self.btn_stop.setEnabled(False)
+            self.log_box.append("Остановка…")
+
+    def _on_cancelled(self):
+        self.btn_stop.setEnabled(False)
+        self.btn_run.setEnabled(True)
+        self.btn_run.setText("▶  Запуск симуляции")
+        self.progress_bar.setValue(0)
 
     def _on_progress(self, t_cur: float, t_end: float):
         self.progress_bar.setValue(
@@ -2912,6 +2942,7 @@ class DebrisFlowDialog(QDialog):
 
     def _on_finished(self, payload: dict):
         elapsed_s = time.time() - getattr(self, "_t_run_start", time.time())
+        self.btn_stop.setEnabled(False)
         self.btn_run.setEnabled(True)
         self.btn_run.setText("▶  Запуск симуляции")
         self.progress_bar.setValue(100)
@@ -2956,6 +2987,7 @@ class DebrisFlowDialog(QDialog):
             f"\n\nПапка:\n{os.path.dirname(folder)}")
 
     def _on_error(self, msg: str):
+        self.btn_stop.setEnabled(False)
         self.btn_run.setEnabled(True)
         self.btn_run.setText("▶  Запуск симуляции")
         self.log_box.append(f"\n⛔ ОШИБКА:\n{msg}")

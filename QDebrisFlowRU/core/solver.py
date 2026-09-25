@@ -204,6 +204,8 @@ class SimulationConfig:
     # LIA в крутых руслах с малым трением. 1.0 = исходная схема Bates et al. (2010) =
     # как в опубликованных расчётах; в Landlab по умолчанию 0.8.
     theta: float = 1.0
+    # вызывается раз за шаг; True останавливает расчёт исключением SimulationCancelled
+    cancel_check: Optional[Callable[[], bool]] = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -560,6 +562,10 @@ def warmup_jit(h_min: float = 0.005) -> float:
 # Главный решатель
 # ─────────────────────────────────────────────────────────────────────────────
 
+class SimulationCancelled(RuntimeError):
+    """Выбрасывается DebrisFlowSolver2D.run, когда SimulationConfig.cancel_check() вернул True."""
+
+
 class DebrisFlowSolver2D:
 
     def __init__(self, terrain, params, source, config):
@@ -668,8 +674,11 @@ class DebrisFlowSolver2D:
 
         t_sim = 0.; t_last = 0.; ever_wet = False; t_wall = time.time()
         inflow_done = False
+        cancel = self.config.cancel_check
 
         while t_sim < t_end:
+            if cancel is not None and cancel():
+                raise SimulationCancelled(f"отменено пользователем при t = {t_sim:.1f} с")
 
             dt_cfl, V, wet = _cfl_vol_wet(h, mv, cfl, dmin, dx, dy, h_min)
             dt = min(dt_cfl, dt_max)
