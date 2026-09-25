@@ -600,6 +600,7 @@ class DebrisFlowSolver2D:
             self.h[:] = np.maximum(self.source.h0_array, 0.)
         self.h[~self.terrain.mask_valid] = 0.
         np.copyto(self.h_max, self.h)
+        self._h_init = self.h.copy()
         self.t_arrival[self.h > self.params.h_min] = 0.
         self.volume_initial = np.sum(self.h)*self.terrain.dx*self.terrain.dy
 
@@ -705,7 +706,8 @@ class DebrisFlowSolver2D:
                 log.info(f"Flow stopped t={t_sim:.1f} s"); break
 
         self.h[:]=h; self.Qx[:]=Qx; self.Qy[:]=Qy; self.t=t_sim
-        bnd = boundary_cells(self.terrain.mask_valid)
+        # boundary cells actually reached by the flow (depth grew by ≥ h_min over the initial h)
+        bnd = boundary_cells(self.terrain.mask_valid) & (self.h_max - self._h_init >= h_min)
         edge_h_max = float(self.h_max[bnd].max()) if bnd.any() else 0.0
         if edge_h_max >= h_min:
             log.warning(f"Flow reached the closed domain boundary: h_max at the edge = "
