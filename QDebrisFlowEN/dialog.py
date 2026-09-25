@@ -1290,9 +1290,15 @@ class DebrisFlowDialog(QDialog):
             "Theoretical values (O'Brien & Julien 1985):\n"
             "  K = 24 — wide rectangular channel (Bingham flow)\n"
             "  K = 8  — pipe flow\n\n"
-            "FLO-2D (Barnhart et al. 2021, Table 1):\n"
-            "  log K from 1.38 to 3.70; expert opinion ≈ 2290.\n\n"
-            "Default: 24 (an analytically rigorous value).")
+            "FLO-2D Mudflow Guidelines: K grows with roughness and irregular\n"
+            "cross-sections up to ~50 000; K = 2285 (calibrated on Rudd Creek)\n"
+            "is used for most urban studies.\n"
+            "Barnhart et al. (2021, Table 1): log K from 1.38 to 3.70.\n\n"
+            "Default 24 = the smooth wide-channel value: the viscous resistance\n"
+            "is then ~100× weaker than with the FLO-2D practice value 2285 —\n"
+            "calibrate K or justify the choice.\n"
+            "NB: in FLO-2D K = 0 means \"compute K from Manning n\"; here K = 0\n"
+            "would switch the viscous term off (the field starts at 0.001).")
         fl_n.addRow("K — shape factor [-]:", self.spin_K)
         layout.addWidget(grp_n)
 

@@ -59,6 +59,8 @@ class OBrienParameters:
     # ── Turbulent term ─────────────────────────────────────────────────────────
     manning_n: float = 0.06
     K_visc:    float = 24.0  # shape factor for the viscous term (24 = wide channel)
+    # FLO-2D: K grows up to ~50 000 on rough channels, 2285 for most urban studies.
+    # K = 0 switches the viscous term off (in FLO-2D K = 0 means "compute from n").
 
     h_min: float = 0.005  # minimum depth of a wet cell [m]
 
