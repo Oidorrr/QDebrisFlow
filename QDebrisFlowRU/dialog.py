@@ -36,7 +36,6 @@ from qgis.core import (QgsMapLayerProxyModel, QgsWkbTypes, QgsGeometry, QgsPoint
 from qgis.gui import QgsMapLayerComboBox
 
 _H_MIN = 0.005   # мин. глубина мокрой ячейки [м] — скрыто от пользователя
-_CFL   = 0.40    # число Куранта — скрыто от пользователя
 
 
 # ─────────────────────────────────────────────────────────────────────────────

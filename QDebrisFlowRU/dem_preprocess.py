@@ -65,20 +65,21 @@ def fill_sinks(dem: np.ndarray, nodata: float = -9999.0,
             current_dem    = dem[ci_slice, cj_slice]
             is_interior    = interior[ci_slice, cj_slice]
 
-            # A cell should be lowered if a neighbour + epsilon is lower
+            # Planchon & Darboux (2001), both operations at once:
+            #   Z(c) >= W(n)+eps          -> W(c) = Z(c)      (the cell drains)
+            #   W(c) > W(n)+eps > Z(c)    -> W(c) = W(n)+eps  (lower the surface)
+            # i.e. W(c) = max(Z(c), min(W(c), W(n)+eps)) for interior cells.
+            # (The first operation was missing: every cell stayed above its
+            # uphill neighbours and the whole DEM was 'filled'.)
             candidate = neighbour_elev + epsilon
-            should_lower = (
-                is_interior &
-                (candidate < current_elev) &
-                (candidate >= current_dem)  # cannot go below original DEM
+            new_elev = np.where(
+                is_interior,
+                np.maximum(current_dem, np.minimum(current_elev, candidate)),
+                current_elev
             )
 
-            if np.any(should_lower):
-                filled[ci_slice, cj_slice] = np.where(
-                    should_lower,
-                    np.maximum(candidate, current_dem),
-                    current_elev
-                )
+            if np.any(new_elev != current_elev):
+                filled[ci_slice, cj_slice] = new_elev
                 changed = True
 
         if iteration % 100 == 0:
@@ -215,6 +216,9 @@ if __name__ == "__main__":
 
     assert filled[10, 10] > dem[10, 10], "Sink should be filled"
     assert np.all(filled >= dem), "Filled DEM must be >= original"
+    others = np.ones_like(dem, dtype=bool); others[10, 10] = False
+    assert np.array_equal(filled[others], dem[others]), "Cells without sinks must not change"
+    assert abs(filled[10, 10] - (dem[11, 10] + 0.01)) < 1e-9, "Pit filled to its outlet + epsilon"
     print("✓ fill_sinks OK")
 
     diag = check_dem_quality(dem)
