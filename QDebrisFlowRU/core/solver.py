@@ -600,6 +600,7 @@ class DebrisFlowSolver2D:
             self.h[:] = np.maximum(self.source.h0_array, 0.)
         self.h[~self.terrain.mask_valid] = 0.
         np.copyto(self.h_max, self.h)
+        self._h_init = self.h.copy()
         self.t_arrival[self.h > self.params.h_min] = 0.
         self.volume_initial = np.sum(self.h)*self.terrain.dx*self.terrain.dy
 
@@ -705,7 +706,8 @@ class DebrisFlowSolver2D:
                 log.info(f"Поток остановился t={t_sim:.1f} с"); break
 
         self.h[:]=h; self.Qx[:]=Qx; self.Qy[:]=Qy; self.t=t_sim
-        bnd = boundary_cells(self.terrain.mask_valid)
+        # граничные ячейки, куда действительно пришёл поток (глубина выросла на ≥ h_min над начальной)
+        bnd = boundary_cells(self.terrain.mask_valid) & (self.h_max - self._h_init >= h_min)
         edge_h_max = float(self.h_max[bnd].max()) if bnd.any() else 0.0
         if edge_h_max >= h_min:
             log.warning(f"Поток дошёл до непроницаемой границы домена: h_max на краю = "
