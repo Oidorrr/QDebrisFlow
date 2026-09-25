@@ -34,6 +34,7 @@ def _compute_sweep_metrics(
         obs_cols:   np.ndarray,
         obs_depths: np.ndarray,
         threshold:  float = 0.5,
+        eval_mask:  np.ndarray = None,
 ) -> dict:
     """
     Вычисляет все метрики для одного прогона.
@@ -43,14 +44,21 @@ def _compute_sweep_metrics(
         FP = переохват        ∈ [0, 1]
         FN = недоохват        ∈ [0, 1]
 
-    ΩT  = (TP−FP−FN)/(TP+FP+FN)          [Heiser 2017, eq.2]
+    ΩT  = (TP−FP−FN)/(TP+FP+FN)          [Heiser et al. 2017; нормировка на объединение]
     ΩTm = (1−ΩT)/2                        0=лучший, 1=худший
+        тождество: ΩT = 2·CSI − 1 и ΩTm = 1 − CSI, CSI = TP/(TP+FP+FN)
+    eval_mask (необязательно) — ячейки вне маски не учитываются в TP/FP/FN
+        (например, русла выше картированной зоны)
     Δo  = Σ|ri|[ri<0] / Σ|d_obs|          переоценка глубины
     Δu  = Σ|ri|[ri>0] / Σ|d_obs|          недооценка глубины
     Cm  = (2·ΩTm + Δo,c + Δu) / 4        0=лучший, 1=худший
     """
     sim_wet  = h_max_sim >= threshold
     obs_bool = obs_mask.astype(bool)
+    if eval_mask is not None:
+        ev = np.asarray(eval_mask, dtype=bool)
+        sim_wet = sim_wet & ev
+        obs_bool = obs_bool & ev
 
     n_TP = int(np.sum( sim_wet &  obs_bool))
     n_FP = int(np.sum( sim_wet & ~obs_bool))
@@ -220,6 +228,7 @@ def run_one_sample(args: dict) -> dict:
             args["obs_cols"],
             args["obs_depths"],
             threshold = args["depth_threshold"],
+            eval_mask = args.get("eval_mask"),
         )
 
         wall_s = time.time() - t0
