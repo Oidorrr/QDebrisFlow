@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import numpy as np
 from dataclasses import dataclass, field
+from typing import Optional
 
 RHO_WATER:    float = 1000.0
 RHO_SEDIMENT: float = 2650.0
@@ -63,6 +64,9 @@ class OBrienParameters:
     # K = 0 switches the viscous term off (in FLO-2D K = 0 means "compute from n").
 
     h_min: float = 0.005  # minimum depth of a wet cell [m]
+    # True → direct input (τy may be 0: purely viscous), False → exponential coefficients,
+    # None → legacy rule "direct if tau_yield_direct > 0" (kept for old callers)
+    direct_mode: Optional[bool] = None
 
     # ── Derived ────────────────────────────────────────────────────────────────
     rho_mixture:   float = field(init=False)
@@ -84,7 +88,11 @@ class OBrienParameters:
         self.rho_mixture   = self.rho_sediment * self.Cv + self.rho_water * (1.0 - self.Cv)
         self.gamma_mixture = self.rho_mixture * GRAVITY
 
-        self._direct_mode = self.tau_yield_direct > 0.0
+        # explicit mode wins; the legacy rule silently switched τy = 0 to the exponential mode
+        self._direct_mode = (self.tau_yield_direct > 0.0 if self.direct_mode is None
+                             else bool(self.direct_mode))
+        if self._direct_mode and self.eta_direct <= 0:
+            raise ValueError("In direct mode eta_direct > 0 must be specified")
         if self._direct_mode:
             self.tau_yield = self.tau_yield_direct
             self.eta       = self.eta_direct

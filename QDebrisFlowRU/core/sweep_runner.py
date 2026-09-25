@@ -183,6 +183,7 @@ def run_one_sample(args: dict) -> dict:
             rho_sediment     = args.get("rho_s", 2650.0),
             rho_water        = args.get("rho_w", 1000.0),
             tau_yield_direct = tau_y,
+            direct_mode      = True,
             eta_direct       = eta,
             manning_n        = n_man,
             K_visc           = k_val,
