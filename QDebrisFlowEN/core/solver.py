@@ -520,7 +520,7 @@ else:
         Qxc[:,1:-1]=0.5*(Qx[:,:-1]+Qx[:,1:]); Qxc[:,0]=Qx[:,0]; Qxc[:,-1]=Qx[:,-1]
         Qyc = np.zeros((ny, nx))
         Qyc[1:-1,:]=0.5*(Qy[:-1,:]+Qy[1:,:]); Qyc[0,:]=Qy[0,:]; Qyc[-1,:]=Qy[-1,:]
-        vm = np.minimum(np.sqrt(Qxc**2+Qyc**2)/hd, 30.)
+        vm = np.where(h >= h_min, np.minimum(np.sqrt(Qxc**2+Qyc**2)/hd, 30.), 0.)   # dry cells (h < h_min) get no velocity — same as the Numba kernel
         np.maximum(V_max, vm, out=V_max)
         hv2 = np.where(h >= h_min, h * vm**2, 0.)     # instantaneous h·v² [m³/s²]
         up = hv2 > HV2_max   # Froude number V/√(g·h) at the moment of peak h·v²
@@ -731,6 +731,10 @@ class DebrisFlowSolver2D:
         if edge_h_max >= h_min:
             log.warning(f"Flow reached the closed domain boundary: h_max at the edge = "
                         f"{edge_h_max:.3f} m — the fluid accumulates there instead of leaving")
+        n_vcap = int(np.sum(self.V_max >= 30.0 - 1e-9))   # V is clipped at 30 m/s in _update_max
+        if n_vcap:
+            log.warning(f"Velocity reached the 30 m/s cap in {n_vcap} cells — a symptom of LIA "
+                        f"oscillations (see theta) or of cells emptied in one step")
         log.info(f"Completed [{backend}]: {self.n_steps} steps, "
                  f"{t_sim:.1f} s, {time.time()-t_wall:.2f} s CPU")
 
@@ -745,6 +749,7 @@ class DebrisFlowSolver2D:
             HV2_max=self.HV2_max,
             Fr_hv2=self.Fr_hv2,
             edge_h_max=edge_h_max,
+            n_vcap_cells=n_vcap,
         )
 
 
@@ -777,6 +782,8 @@ class SimulationResult:
     Fr_hv2:           Optional[np.ndarray] = None
     # max h_max over boundary cells (grid edge / next to nodata); > h_min → flow hit the wall
     edge_h_max:       float = 0.0
+    # number of cells whose velocity hit the 30 m/s cap (> 0 → V_max/HV2_max there are unreliable)
+    n_vcap_cells:     int = 0
 
     def max_inundation_area(self, h_threshold: float = 0.01) -> float:
         return np.sum(self.h_max > h_threshold) * self.terrain.dx * self.terrain.dy

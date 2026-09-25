@@ -520,7 +520,7 @@ else:
         Qxc[:,1:-1]=0.5*(Qx[:,:-1]+Qx[:,1:]); Qxc[:,0]=Qx[:,0]; Qxc[:,-1]=Qx[:,-1]
         Qyc = np.zeros((ny, nx))
         Qyc[1:-1,:]=0.5*(Qy[:-1,:]+Qy[1:,:]); Qyc[0,:]=Qy[0,:]; Qyc[-1,:]=Qy[-1,:]
-        vm = np.minimum(np.sqrt(Qxc**2+Qyc**2)/hd, 30.)
+        vm = np.where(h >= h_min, np.minimum(np.sqrt(Qxc**2+Qyc**2)/hd, 30.), 0.)   # сухие ячейки (h < h_min) скорости не получают — как в ядре Numba
         np.maximum(V_max, vm, out=V_max)
         hv2 = np.where(h >= h_min, h * vm**2, 0.)     # мгновенное h·v² [м³/с²]
         up = hv2 > HV2_max   # число Фруда V/√(g·h) в момент пика h·v²
@@ -731,6 +731,10 @@ class DebrisFlowSolver2D:
         if edge_h_max >= h_min:
             log.warning(f"Поток дошёл до непроницаемой границы домена: h_max на краю = "
                         f"{edge_h_max:.3f} м — жидкость накапливается там, а не уходит")
+        n_vcap = int(np.sum(self.V_max >= 30.0 - 1e-9))   # V ограничена 30 м/с в _update_max
+        if n_vcap:
+            log.warning(f"Скорость упёрлась в предел 30 м/с в {n_vcap} ячейках — признак колебаний "
+                        f"LIA (см. theta) или ячеек, опустошённых за один шаг")
         log.info(f"Завершено [{backend}]: {self.n_steps} шагов, "
                  f"{t_sim:.1f} с, {time.time()-t_wall:.2f} с CPU")
 
@@ -745,6 +749,7 @@ class DebrisFlowSolver2D:
             HV2_max=self.HV2_max,
             Fr_hv2=self.Fr_hv2,
             edge_h_max=edge_h_max,
+            n_vcap_cells=n_vcap,
         )
 
 
@@ -777,6 +782,8 @@ class SimulationResult:
     Fr_hv2:           Optional[np.ndarray] = None
     # максимум h_max по граничным ячейкам (край сетки / соседство с nodata); > h_min → поток у стенки
     edge_h_max:       float = 0.0
+    # число ячеек, где скорость упёрлась в предел 30 м/с (> 0 → V_max/HV2_max там ненадёжны)
+    n_vcap_cells:     int = 0
 
     def max_inundation_area(self, h_threshold: float = 0.01) -> float:
         return np.sum(self.h_max > h_threshold) * self.terrain.dx * self.terrain.dy
