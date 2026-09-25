@@ -139,14 +139,11 @@ def run_one_sample(args: dict) -> dict:
 
     Returns a row_data dict (including h_max for tracking the best run).
     """
-    # ── Path initialisation (needed in the child process) ────────────────────
-    plugin_dir = args.get("plugin_dir", "")
-    if plugin_dir and plugin_dir not in sys.path:
-        sys.path.insert(0, plugin_dir)
-
+    # relative imports: this module is part of the plugin's `core` package, so a
+    # top-level `core` of another plugin cannot shadow it (args["plugin_dir"] unused)
     try:
-        from core.rheology import OBrienParameters
-        from core.solver   import (TerrainGrid, SimulationConfig,
+        from .rheology import OBrienParameters
+        from .solver   import (TerrainGrid, SimulationConfig,
                                     SourceCondition, InflowSource,
                                     DebrisFlowSolver2D)
     except ImportError as exc:
