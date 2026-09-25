@@ -602,6 +602,20 @@ class DebrisFlowSolver2D:
         np.copyto(self.h_max, self.h)
         self._h_init = self.h.copy()
         self.t_arrival[self.h > self.params.h_min] = 0.
+        # source cells on nodata would silently destroy the injected volume → drop them
+        # and spread the inflow over the remaining cells of the same source
+        self._sources = []
+        for s in self.source.inflow_sources:
+            keep = self.terrain.mask_valid[s.rows, s.cols]
+            if not keep.any():
+                log.warning(f"Source '{s.name}' lies entirely on nodata cells — ignored")
+                continue
+            if not keep.all():
+                log.warning(f"Source '{s.name}': {int((~keep).sum())} of {s.n_cells} cells are "
+                            "nodata — the inflow is spread over the remaining cells")
+            self._sources.append(InflowSource(
+                rows=np.asarray(s.rows)[keep], cols=np.asarray(s.cols)[keep],
+                times=s.times, q_total=s.q_total, name=s.name))
         self.volume_initial = np.sum(self.h)*self.terrain.dx*self.terrain.dy
 
         backend = "Numba JIT" if _NUMBA_AVAILABLE else "NumPy"
@@ -660,7 +674,7 @@ class DebrisFlowSolver2D:
             dt = min(dt_cfl, dt_max)
             # CFL must also hold for the depth the inflow adds during this step (on a dry
             # domain dt_cfl = 1e9, and the first step would otherwise run with dt_max)
-            for src in self.source.inflow_sources:
+            for src in self._sources:
                 v_in = src.volume_between(t_sim, t_sim + dt)
                 if v_in > 0.:
                     h_src = (float(h[src.rows, src.cols].max())
@@ -673,7 +687,7 @@ class DebrisFlowSolver2D:
             dt = min(dt, t_end - t_sim)
 
             # inflow: exact volume of the piecewise-linear Q(t) over [t, t+dt] (not Q(t)·dt)
-            for src in self.source.inflow_sources:
+            for src in self._sources:
                 v_in = src.volume_between(t_sim, t_sim + dt)
                 if v_in > 0.:
                     rate = v_in / (dt * src.n_cells * cell_area)
@@ -685,11 +699,14 @@ class DebrisFlowSolver2D:
                         h[src.rows, src.cols] += rate * dt
 
             h, Qx, Qy = _lia_step(h, Qx, Qy, z, mv, dx, dy, dt, h_min, n2, Ke, ty, lim, theta)
-            _update_max(h, Qx, Qy, self.h_max, self.V_max, self.t_arrival, h_min, t_sim,
+            _update_max(h, Qx, Qy, self.h_max, self.V_max, self.t_arrival, h_min, t_sim + dt,
                         self.HV2_max, self.Fr_hv2)
 
+            # volume at the START of the step (before inflow) → labelled t_sim; stored every
+            # output_interval only (one entry per step could take GBs on long runs)
+            if not self.volume_history or t_sim - self.volume_history[-1][0] >= out_iv:
+                self.volume_history.append((t_sim, V))
             t_sim += dt; self.n_steps += 1
-            self.volume_history.append((t_sim, V))
 
             if not ever_wet and wet > 0:
                 ever_wet = True
@@ -706,6 +723,8 @@ class DebrisFlowSolver2D:
                 log.info(f"Flow stopped t={t_sim:.1f} s"); break
 
         self.h[:]=h; self.Qx[:]=Qx; self.Qy[:]=Qy; self.t=t_sim
+        # final volume (after the last step) — used by volume_balance()
+        self.volume_history.append((t_sim, float(np.sum(h[mv])) * cell_area))
         # boundary cells actually reached by the flow (depth grew by ≥ h_min over the initial h)
         bnd = boundary_cells(self.terrain.mask_valid) & (self.h_max - self._h_init >= h_min)
         edge_h_max = float(self.h_max[bnd].max()) if bnd.any() else 0.0
