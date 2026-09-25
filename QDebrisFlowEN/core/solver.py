@@ -199,6 +199,11 @@ class SimulationConfig:
     # source is unconfirmed. It slows wetting fronts (test fan: arrival +7…16 %) and
     # amplifies channel pulsations. ON by default = behaviour of the published runs.
     face_depth_limiter: bool = True
+    # θ-weighting of the discharge in the momentum update (de Almeida et al. 2012;
+    # Cozzolino et al. 2021, eq. 19): θ·q + (1−θ)/2·(q_prev + q_next). Damps the LIA
+    # oscillations in steep low-friction channels. 1.0 = original Bates et al. (2010)
+    # scheme = behaviour of the published runs; Landlab uses 0.8 by default.
+    theta: float = 1.0
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -208,7 +213,7 @@ class SimulationConfig:
 if _NUMBA_AVAILABLE:
 
     @njit(cache=True, fastmath=True, nogil=True)
-    def _lia_step(h, Qx, Qy, z, mask, dx, dy, dt, h_min, n2, K_eta_8gm, tau_gm, lim):
+    def _lia_step(h, Qx, Qy, z, mask, dx, dy, dt, h_min, n2, K_eta_8gm, tau_gm, lim, theta):
         G = 9.81
         ny, nx = h.shape[0], h.shape[1]
         nxm, nym = nx - 1, ny - 1
@@ -232,6 +237,13 @@ if _NUMBA_AVAILABLE:
                 if hf <= h_min:
                     continue
                 q  = Qx[i, j]
+                qm = q   # θ-weighting (de Almeida et al. 2012); missing/nodata neighbours are dropped
+                if theta < 1.:
+                    nb = 0; s = 0.
+                    if j > 0 and mask[i, j-1]:     s += Qx[i, j-1]; nb += 1
+                    if j < nxm-1 and mask[i, j+2]: s += Qx[i, j+1]; nb += 1
+                    if nb == 2:   qm = theta*q + (1.-theta)*0.5*s
+                    elif nb == 1: qm = theta*q + (1.-theta)*s
                 qt = 0.
                 if i > 0:   qt += Qy[i-1, j] + Qy[i-1, j+1]
                 if i < nym: qt += Qy[i, j]   + Qy[i, j+1]
@@ -240,7 +252,7 @@ if _NUMBA_AVAILABLE:
                 sf = n2 * vm / hf**(4./3.) + K_eta_8gm / hf**2
                 d  = 1. + G * dt * sf
                 if d < 1.: d = 1.
-                Fx[i, j] = q - G * hf * dt * (eR - eL) / dx
+                Fx[i, j] = qm - G * hf * dt * (eR - eL) / dx
                 Dx[i, j] = d
 
         # Y-faces
@@ -258,6 +270,13 @@ if _NUMBA_AVAILABLE:
                 if hf <= h_min:
                     continue
                 q  = Qy[i, j]
+                qm = q
+                if theta < 1.:
+                    nb = 0; s = 0.
+                    if i > 0 and mask[i-1, j]:     s += Qy[i-1, j]; nb += 1
+                    if i < nym-1 and mask[i+2, j]: s += Qy[i+1, j]; nb += 1
+                    if nb == 2:   qm = theta*q + (1.-theta)*0.5*s
+                    elif nb == 1: qm = theta*q + (1.-theta)*s
                 qt = 0.
                 if j > 0:   qt += Qx[i, j-1] + Qx[i+1, j-1]
                 if j < nxm: qt += Qx[i, j]   + Qx[i+1, j]
@@ -266,7 +285,7 @@ if _NUMBA_AVAILABLE:
                 sf = n2 * vm / hf**(4./3.) + K_eta_8gm / hf**2
                 d  = 1. + G * dt * sf
                 if d < 1.: d = 1.
-                Fy[i, j] = q - G * hf * dt * (eD - eU) / dy
+                Fy[i, j] = qm - G * hf * dt * (eD - eU) / dy
                 Dy[i, j] = d
 
         # Yield stress τy/(γm·h) of the FLO-2D Sf acts against the trial discharge VECTOR
@@ -392,6 +411,24 @@ if _NUMBA_AVAILABLE:
 else:
     # ── NumPy fallback ────────────────────────────────────────────────────────
 
+    def _theta_mean(Q, valid, theta, axis):
+        """θ-weighted discharge θ·q + (1−θ)/2·(q_prev + q_next) (de Almeida et al. 2012);
+        missing or nodata neighbours are dropped (weights θ, 1−θ with one neighbour)."""
+        if theta >= 1.0:
+            return Q
+        prev = np.zeros_like(Q); nxt = np.zeros_like(Q)
+        vp = np.zeros(Q.shape, dtype=bool); vn = np.zeros(Q.shape, dtype=bool)
+        if axis == 1:
+            prev[:, 1:] = Q[:, :-1]; vp[:, 1:] = valid[:, :-1]
+            nxt[:, :-1] = Q[:, 1:];  vn[:, :-1] = valid[:, 1:]
+        else:
+            prev[1:, :] = Q[:-1, :]; vp[1:, :] = valid[:-1, :]
+            nxt[:-1, :] = Q[1:, :];  vn[:-1, :] = valid[1:, :]
+        n = vp.astype(np.int64) + vn.astype(np.int64)
+        tot = np.where(vp, prev, 0.) + np.where(vn, nxt, 0.)
+        return np.where(n == 2, theta*Q + (1.-theta)*0.5*tot,
+                        np.where(n == 1, theta*Q + (1.-theta)*tot, Q))
+
     def _avg4_y_to_x(A):
         """Average of the four y-face values around every x-face (missing faces = 0)."""
         P = np.zeros((A.shape[0] + 2, A.shape[1])); P[1:-1, :] = A
@@ -402,7 +439,7 @@ else:
         P = np.zeros((A.shape[0], A.shape[1] + 2)); P[:, 1:-1] = A
         return 0.25 * (P[:-1, :-1] + P[:-1, 1:] + P[1:, :-1] + P[1:, 1:])
 
-    def _lia_step(h, Qx, Qy, z, mask, dx, dy, dt, h_min, n2, K_eta_8gm, tau_gm, lim):
+    def _lia_step(h, Qx, Qy, z, mask, dx, dy, dt, h_min, n2, K_eta_8gm, tau_gm, lim, theta):
         G  = 9.81
         mv = mask
         eta = z + h
@@ -432,8 +469,10 @@ else:
                 + K_eta_8gm / hfy**2)
         denom_x = np.maximum(1. + G*dt*sf_x, 1.)
         denom_y = np.maximum(1. + G*dt*sf_y, 1.)
-        F_x = np.where(wet_x, Qx - G*hf_x*dt*np.nan_to_num((eR-eL)/dx), 0.)
-        F_y = np.where(wet_y, Qy - G*hf_y*dt*np.nan_to_num((eD-eU)/dy), 0.)
+        qm_x = _theta_mean(Qx, mv[:, :-1] & mv[:, 1:], theta, 1)
+        qm_y = _theta_mean(Qy, mv[:-1, :] & mv[1:, :], theta, 0)
+        F_x = np.where(wet_x, qm_x - G*hf_x*dt*np.nan_to_num((eR-eL)/dx), 0.)
+        F_y = np.where(wet_y, qm_y - G*hf_y*dt*np.nan_to_num((eD-eU)/dy), 0.)
 
         # τy acts against the trial discharge VECTOR (isotropic): rest if |F| ≤ g·Δt·τy/γm,
         # otherwise |F| is reduced by the yield impulse before dividing by the denominator
@@ -510,7 +549,7 @@ def warmup_jit(h_min: float = 0.005) -> float:
     fr = np.zeros((4,4),dtype=np.float64)
     r  = np.zeros(2, dtype=np.int64)
     c  = np.arange(2, dtype=np.int64)
-    _lia_step(h,Qx,Qy,z,mv,10.,10.,1.,h_min,0.0036,1e-4,0.001,True)
+    _lia_step(h,Qx,Qy,z,mv,10.,10.,1.,h_min,0.0036,1e-4,0.001,True,0.8)
     _cfl_vol_wet(h,mv,0.4,10.,10.,10.,h_min)
     _update_max(h,Qx,Qy,hm,vm,ta,h_min,0.,hv,fr)
     _add_inflow(h,r,c,0.1,1.0)
@@ -607,6 +646,7 @@ class DebrisFlowSolver2D:
         n2     = self._n2; Ke = self._K_eta_8gm; ty = self._tau_gm
         cfl    = self.config.cfl_number; dmin = self._dx_min
         lim    = bool(self.config.face_depth_limiter)
+        theta  = float(self.config.theta)
         dt_max = self.config.dt_max; dt_min = self.config.dt_min
         t_end  = self.config.t_end; out_iv = self.config.output_interval
         cell_area = dx * dy
@@ -643,7 +683,7 @@ class DebrisFlowSolver2D:
                     else:
                         h[src.rows, src.cols] += rate * dt
 
-            h, Qx, Qy = _lia_step(h, Qx, Qy, z, mv, dx, dy, dt, h_min, n2, Ke, ty, lim)
+            h, Qx, Qy = _lia_step(h, Qx, Qy, z, mv, dx, dy, dt, h_min, n2, Ke, ty, lim, theta)
             _update_max(h, Qx, Qy, self.h_max, self.V_max, self.t_arrival, h_min, t_sim,
                         self.HV2_max, self.Fr_hv2)
 
