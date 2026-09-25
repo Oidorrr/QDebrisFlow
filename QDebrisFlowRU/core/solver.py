@@ -602,6 +602,20 @@ class DebrisFlowSolver2D:
         np.copyto(self.h_max, self.h)
         self._h_init = self.h.copy()
         self.t_arrival[self.h > self.params.h_min] = 0.
+        # ячейки источника на nodata молча уничтожали бы введённый объём → отбрасываем их
+        # и распределяем приток по оставшимся ячейкам того же источника
+        self._sources = []
+        for s in self.source.inflow_sources:
+            keep = self.terrain.mask_valid[s.rows, s.cols]
+            if not keep.any():
+                log.warning(f"Источник '{s.name}' целиком на ячейках nodata — пропущен")
+                continue
+            if not keep.all():
+                log.warning(f"Источник '{s.name}': {int((~keep).sum())} из {s.n_cells} ячеек — "
+                            "nodata; приток распределён по остальным ячейкам")
+            self._sources.append(InflowSource(
+                rows=np.asarray(s.rows)[keep], cols=np.asarray(s.cols)[keep],
+                times=s.times, q_total=s.q_total, name=s.name))
         self.volume_initial = np.sum(self.h)*self.terrain.dx*self.terrain.dy
 
         backend = "Numba JIT" if _NUMBA_AVAILABLE else "NumPy"
@@ -660,7 +674,7 @@ class DebrisFlowSolver2D:
             dt = min(dt_cfl, dt_max)
             # CFL должно выполняться и для глубины, которую приток добавит за этот шаг (на
             # сухом домене dt_cfl = 1e9, и первый шаг иначе шёл бы с dt_max)
-            for src in self.source.inflow_sources:
+            for src in self._sources:
                 v_in = src.volume_between(t_sim, t_sim + dt)
                 if v_in > 0.:
                     h_src = (float(h[src.rows, src.cols].max())
@@ -673,7 +687,7 @@ class DebrisFlowSolver2D:
             dt = min(dt, t_end - t_sim)
 
             # приток: точный объём кусочно-линейного Q(t) на [t, t+dt] (а не Q(t)·dt)
-            for src in self.source.inflow_sources:
+            for src in self._sources:
                 v_in = src.volume_between(t_sim, t_sim + dt)
                 if v_in > 0.:
                     rate = v_in / (dt * src.n_cells * cell_area)
@@ -685,11 +699,14 @@ class DebrisFlowSolver2D:
                         h[src.rows, src.cols] += rate * dt
 
             h, Qx, Qy = _lia_step(h, Qx, Qy, z, mv, dx, dy, dt, h_min, n2, Ke, ty, lim, theta)
-            _update_max(h, Qx, Qy, self.h_max, self.V_max, self.t_arrival, h_min, t_sim,
+            _update_max(h, Qx, Qy, self.h_max, self.V_max, self.t_arrival, h_min, t_sim + dt,
                         self.HV2_max, self.Fr_hv2)
 
+            # объём на НАЧАЛО шага (до притока) → метка t_sim; пишется раз в output_interval
+            # (запись на каждом шаге на длинных прогонах занимала бы гигабайты)
+            if not self.volume_history or t_sim - self.volume_history[-1][0] >= out_iv:
+                self.volume_history.append((t_sim, V))
             t_sim += dt; self.n_steps += 1
-            self.volume_history.append((t_sim, V))
 
             if not ever_wet and wet > 0:
                 ever_wet = True
@@ -706,6 +723,8 @@ class DebrisFlowSolver2D:
                 log.info(f"Поток остановился t={t_sim:.1f} с"); break
 
         self.h[:]=h; self.Qx[:]=Qx; self.Qy[:]=Qy; self.t=t_sim
+        # финальный объём (после последнего шага) — его использует volume_balance()
+        self.volume_history.append((t_sim, float(np.sum(h[mv])) * cell_area))
         # граничные ячейки, куда действительно пришёл поток (глубина выросла на ≥ h_min над начальной)
         bnd = boundary_cells(self.terrain.mask_valid) & (self.h_max - self._h_init >= h_min)
         edge_h_max = float(self.h_max[bnd].max()) if bnd.any() else 0.0
