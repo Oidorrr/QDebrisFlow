@@ -642,6 +642,13 @@ class SweepWorker(QThread):
             self.sweep_log.emit("Растеризация полигона инундации...")
             obs_mask = self._rasterize_polygon(p["obs_poly_layer"], geo_info)
             self.sweep_log.emit(f"Наблюдаемая инундация: {obs_mask.sum()} ячеек")
+            eval_mask = None
+            if p.get("eval_poly_layer") is not None:
+                eval_mask = self._rasterize_polygon(p["eval_poly_layer"], geo_info)
+                obs_out = int(np.sum(obs_mask & ~eval_mask))
+                self.sweep_log.emit(
+                    f"Область оценки: {int(eval_mask.sum())} ячеек"
+                    + (f" (⚠ {obs_out} наблюдённых ячеек вне её)" if obs_out else ""))
 
             # ── Точки глубин ──────────────────────────────────────────────────
             self.sweep_log.emit("Чтение точек глубин...")
@@ -683,6 +690,7 @@ class SweepWorker(QThread):
                 src_cells       = src_cells,
                 base_vol        = base_vol,
                 obs_mask        = obs_mask,
+                eval_mask       = eval_mask,
                 obs_rows        = obs_rows,
                 obs_cols        = obs_cols,
                 obs_depths      = obs_depths,
@@ -943,19 +951,21 @@ class SweepWorker(QThread):
         rows, cols, depths = [], [], []
         for feat in pts_layer.getFeatures():
             geom = feat.geometry()
-            if geom is None:
+            if geom is None or geom.isEmpty():
                 continue
-            pt = geom.asPoint()
-            col = int((pt.x() - xmin) / dx)
-            row = int((ymax - pt.y()) / dy)
-            if 0 <= row < ny and 0 <= col < nx:
-                try:
-                    d = float(feat[depth_field])
-                except (KeyError, TypeError, ValueError):
-                    continue
-                rows.append(row)
-                cols.append(col)
-                depths.append(d)
+            try:
+                d = float(feat[depth_field])
+            except (KeyError, TypeError, ValueError):
+                continue
+            # допускается MultiPoint; floor (а не int), чтобы точки левее/выше сетки отбрасывались
+            pts = geom.asMultiPoint() if geom.isMultipart() else [geom.asPoint()]
+            for pt in pts:
+                col = int(np.floor((pt.x() - xmin) / dx))
+                row = int(np.floor((ymax - pt.y()) / dy))
+                if 0 <= row < ny and 0 <= col < nx:
+                    rows.append(row)
+                    cols.append(col)
+                    depths.append(d)
 
         return (np.array(rows, dtype=np.int64),
                 np.array(cols, dtype=np.int64),
@@ -1618,6 +1628,17 @@ class DebrisFlowDialog(QDialog):
             "Используется для расчёта TP, FP, FN, ΩTm.")
         fl_obs.addRow("Зона инундации (SHP):", self.combo_obs_poly)
 
+        self.combo_eval_poly = QgsMapLayerComboBox()
+        self.combo_eval_poly.setFilters(QgsMapLayerProxyModel.PolygonLayer)
+        self.combo_eval_poly.setAllowEmptyLayer(True)
+        self.combo_eval_poly.setLayer(None)
+        self.combo_eval_poly.setToolTip(
+            "Необязательный полигон области, где картировалось затопление.\n"
+            "Ячейки вне него не учитываются в TP/FP/FN, чтобы поток в руслах\n"
+            "выше картированной зоны не считался переохватом.\n"
+            "Пусто — вся ЦМР (прежнее поведение).")
+        fl_obs.addRow("Область оценки (необяз.):", self.combo_eval_poly)
+
         self.combo_obs_pts = QgsMapLayerComboBox()
         self.combo_obs_pts.setFilters(QgsMapLayerProxyModel.PointLayer)
         self.combo_obs_pts.setToolTip(
@@ -1863,6 +1884,7 @@ class DebrisFlowDialog(QDialog):
         payload = {
             "version":         "lhs_1.0",
             "obs_poly_name":   _layer_name(self.combo_obs_poly),
+            "eval_poly_name":  _layer_name(self.combo_eval_poly),
             "obs_pts_name":    _layer_name(self.combo_obs_pts),
             "depth_field":     self.combo_depth_field.currentText(),
             "depth_threshold": self.spin_depth_thr.value(),
@@ -1939,6 +1961,7 @@ class DebrisFlowDialog(QDialog):
                 warnings.append(f"Слой «{name}» не найден в проекте.")
 
         _set_layer(self.combo_obs_poly, d.get("obs_poly_name", ""))
+        _set_layer(self.combo_eval_poly, d.get("eval_poly_name", ""))
         _set_layer(self.combo_obs_pts,  d.get("obs_pts_name",  ""))
         if d.get("depth_field"):
             idx = self.combo_depth_field.findText(d["depth_field"])
@@ -2124,6 +2147,7 @@ class DebrisFlowDialog(QDialog):
             source_layer    = src_layer,
             sources         = sources,
             obs_poly_layer  = obs_poly,
+            eval_poly_layer = self.combo_eval_poly.currentLayer(),
             obs_pts_layer   = obs_pts,
             depth_field     = depth_fld,
             depth_threshold = self.spin_depth_thr.value(),
