@@ -564,7 +564,7 @@ class DebrisFlowSolver2D:
         while t_sim < t_end:
 
             dt_cfl, V, wet = _cfl_vol_wet(h, mv, cfl, dmin, dx, dy, h_min)
-            dt = min(dt_cfl, dt_max, t_end - t_sim)
+            dt = min(dt_cfl, dt_max)
             # CFL must also hold for the depth the inflow adds during this step (on a dry
             # domain dt_cfl = 1e9, and the first step would otherwise run with dt_max)
             q_now = [src.q_at(t_sim) for src in self.source.inflow_sources]
@@ -575,6 +575,9 @@ class DebrisFlowSolver2D:
                     dt = min(dt, cfl * dmin / (GRAVITY * h_src)**0.5)
             if dt < dt_min:
                 raise RuntimeError(f"CFL step {dt:.6f} s < dt_min={dt_min} s")
+            # dt_min guards the stability-limited step only; the last step may be
+            # shorter than dt_min to land exactly on t_end
+            dt = min(dt, t_end - t_sim)
 
             for src, q_t in zip(self.source.inflow_sources, q_now):
                 if q_t > 0.:
