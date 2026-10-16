@@ -37,7 +37,10 @@ The friction slope follows the O'Brien & Julien quadratic form (FLO-2D):
 Sf = τy/(γm·h)  +  K·η·V/(8·γm·h²)  +  n²·V²/h^(4/3)
 ```
 
-- **Yield + viscous + turbulent terms** combined in a single friction slope.
+- **Yield + viscous + turbulent terms** combined in a single friction slope. The
+  turbulent term uses a constant Manning `n`; FLO-2D (Simulating Mudflow
+  Guidelines 2021, eq. 18) writes it with the concentration-dependent turbulent-dispersive
+  `n_td`, so this is a simplification of the FLO-2D form.
 - **Numerical scheme**: Local Inertial Approximation (Bates et al., 2010) on a
   staggered grid. Manning and viscous terms are semi-implicit and use the full
   discharge vector (coupled friction, Cozzolino et al. 2021, eqs. 19–21).
@@ -217,7 +220,7 @@ The **LHS analysis** tab compares simulated against observed data:
 
 ## References
 
-The following works are referenced in the source code:
+The following works are referenced in the code and documentation:
 
 - O'Brien & Julien (1985, 1988) — quadratic rheological model
 - Bates et al. (2010) — local inertial approximation (LIA)
