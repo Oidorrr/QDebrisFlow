@@ -155,7 +155,21 @@ def _read_hydrograph_csv(path: str):
     with open(path, encoding="utf-8-sig", errors="replace") as f:
         lines = [ln.strip() for ln in f if ln.strip()]
     sample = "\n".join(lines[:20])
-    delim = ";" if ";" in sample else ("\t" if "\t" in sample else ("," if "," in sample else None))
+
+    def _comma_splits_numbers():
+        # "," — разделитель, только если делит строку на два числа: в "300 12,5"
+        # это десятичная запятая при разделителе-пробеле
+        for ln in lines[:20]:
+            parts = ln.split(",")
+            try:
+                float(parts[0]); float(parts[1])
+                return True
+            except (ValueError, IndexError):
+                continue
+        return False
+
+    delim = ";" if ";" in sample else ("\t" if "\t" in sample else (
+        "," if "," in sample and _comma_splits_numbers() else None))
     times, qs = [], []
     for k, line in enumerate(lines):
         parts = line.split(delim) if delim else line.split()
