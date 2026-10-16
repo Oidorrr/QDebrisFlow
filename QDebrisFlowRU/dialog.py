@@ -467,6 +467,17 @@ class SimulationWorker(QThread):
                     self.log_message.emit(
                         f"    ⚠ Объект ID={fid} не пересекает DEM, пропуск.")
                     continue
+                # то же правило, что TerrainGrid.mask_valid: солвер отбрасывает ячейки nodata
+                _z = dem[rows, cols]
+                n_valid = int(np.sum((_z != geo_info["nodata"]) & np.isfinite(_z)))
+                if n_valid == 0:
+                    self.log_message.emit(
+                        f"    ⚠ Объект ID={fid} целиком лежит на ячейках nodata ЦМР, пропуск.")
+                    continue
+                if n_valid < len(rows):
+                    self.log_message.emit(
+                        f"    ⚠ {len(rows) - n_valid} из {len(rows)} ячеек — nodata ЦМР; "
+                        "приток распределяется по остальным ячейкам.")
 
                 self.log_message.emit(
                     f"    ✓ {len(rows)} ячеек, "
@@ -487,7 +498,7 @@ class SimulationWorker(QThread):
 
             if not inflow_sources:
                 raise RuntimeError(
-                    "Ни один объект источника не пересекает DEM.\n"
+                    "Ни один объект источника не пересекает действительные (не nodata) ячейки DEM.\n"
                     "Проверьте CRS и экстент линейного слоя.")
 
             source = SourceCondition.from_sources(inflow_sources)
@@ -783,6 +794,18 @@ class SweepWorker(QThread):
                 rows, cols = self._rasterise_feature(wkt, geo_info)
                 if len(rows) == 0:
                     continue
+                # источник целиком на nodata солвер отбрасывает: не включать его и в
+                # базовый объём (то же правило, что TerrainGrid.mask_valid)
+                _z = dem[rows, cols]
+                n_valid = int(np.sum((_z != geo_info["nodata"]) & np.isfinite(_z)))
+                if n_valid == 0:
+                    self.sweep_log.emit(
+                        f"⚠ Источник {src_info['name']} целиком лежит на ячейках nodata ЦМР, пропуск.")
+                    continue
+                if n_valid < len(rows):
+                    self.sweep_log.emit(
+                        f"⚠ Источник {src_info['name']}: {len(rows) - n_valid} из {len(rows)} ячеек — "
+                        "nodata ЦМР; приток распределяется по остальным ячейкам.")
                 src_cells.append({
                     "rows":        rows,
                     "cols":        cols,
@@ -792,7 +815,7 @@ class SweepWorker(QThread):
                 })
 
             if not src_cells:
-                self.sweep_error.emit("Ни один источник не пересекает DEM.")
+                self.sweep_error.emit("Ни один источник не пересекает действительные (не nodata) ячейки DEM.")
                 return
 
             # Базовый объём

@@ -466,6 +466,17 @@ class SimulationWorker(QThread):
                     self.log_message.emit(
                         f"    ⚠ Feature ID={fid} does not intersect the DEM, skipping.")
                     continue
+                # same validity rule as TerrainGrid.mask_valid: the solver drops nodata cells
+                _z = dem[rows, cols]
+                n_valid = int(np.sum((_z != geo_info["nodata"]) & np.isfinite(_z)))
+                if n_valid == 0:
+                    self.log_message.emit(
+                        f"    ⚠ Feature ID={fid} lies entirely on DEM nodata cells, skipping.")
+                    continue
+                if n_valid < len(rows):
+                    self.log_message.emit(
+                        f"    ⚠ {len(rows) - n_valid} of {len(rows)} cells are DEM nodata — "
+                        "the inflow is spread over the remaining cells.")
 
                 self.log_message.emit(
                     f"    ✓ {len(rows)} cells, "
@@ -486,7 +497,7 @@ class SimulationWorker(QThread):
 
             if not inflow_sources:
                 raise RuntimeError(
-                    "No source feature intersects the DEM.\n"
+                    "No source feature intersects valid (non-nodata) DEM cells.\n"
                     "Check the CRS and extent of the line layer.")
 
             source = SourceCondition.from_sources(inflow_sources)
@@ -782,6 +793,18 @@ class SweepWorker(QThread):
                 rows, cols = self._rasterise_feature(wkt, geo_info)
                 if len(rows) == 0:
                     continue
+                # a source entirely on nodata is dropped by the solver: keep it out of
+                # the base volume as well (same validity rule as TerrainGrid.mask_valid)
+                _z = dem[rows, cols]
+                n_valid = int(np.sum((_z != geo_info["nodata"]) & np.isfinite(_z)))
+                if n_valid == 0:
+                    self.sweep_log.emit(
+                        f"⚠ Source {src_info['name']} lies entirely on DEM nodata cells, skipping.")
+                    continue
+                if n_valid < len(rows):
+                    self.sweep_log.emit(
+                        f"⚠ Source {src_info['name']}: {len(rows) - n_valid} of {len(rows)} cells "
+                        "are DEM nodata — the inflow is spread over the remaining cells.")
                 src_cells.append({
                     "rows":        rows,
                     "cols":        cols,
@@ -791,7 +814,7 @@ class SweepWorker(QThread):
                 })
 
             if not src_cells:
-                self.sweep_error.emit("No source intersects the DEM.")
+                self.sweep_error.emit("No source intersects valid (non-nodata) DEM cells.")
                 return
 
             # Base volume
