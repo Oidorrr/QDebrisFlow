@@ -25,8 +25,14 @@ def read_dem_array(layer, source=None, crs=None) -> tuple[np.ndarray, dict]:
         band = ds.GetRasterBand(1)
         nodata = band.GetNoDataValue()
         dem = band.ReadAsArray().astype(np.float64)
+        # band scale/offset (packed integer DEMs): physical value = raw·scale + offset;
+        # nodata stays in raw units
+        scale, offset = band.GetScale(), band.GetOffset()
+        if (scale not in (None, 1.0)) or (offset not in (None, 0.0)):
+            valid = (dem != nodata) if nodata is not None else np.ones(dem.shape, dtype=bool)
+            dem[valid] = dem[valid] * (1.0 if scale is None else scale) + (offset or 0.0)
         gt = ds.GetGeoTransform()
-        if gt[2] != 0 or gt[4] != 0 or gt[5] > 0:
+        if gt[2] != 0 or gt[4] != 0 or gt[5] > 0 or gt[1] < 0:
             raise RotatedRasterError(f"The DEM is not a north-up grid (geotransform {tuple(gt)}); warp it to a north-up raster first.")
         nx, ny = ds.RasterXSize, ds.RasterYSize
         dx, dy = abs(gt[1]), abs(gt[5])
@@ -43,12 +49,9 @@ def read_dem_array(layer, source=None, crs=None) -> tuple[np.ndarray, dict]:
             "geotransform": gt,
             "crs": crs if crs is not None else layer.crs(),
         }
-        if nodata is not None:
-            dem[dem == nodata] = nodata
         return dem, geo_info
-    except RotatedRasterError:
-        raise
-    except Exception:
+    except (RuntimeError, OSError, ImportError):
+        # GDAL cannot open/read the source → QGIS provider (RotatedRasterError is not caught)
         if layer is None:
             raise
         return _read_dem_block(layer)
