@@ -1374,7 +1374,9 @@ class DebrisFlowDialog(QDialog):
         self.spin_Cv_max.setRange(0.60, 0.90); self.spin_Cv_max.setValue(0.615)
         self.spin_Cv_max.setDecimals(3)
         self.spin_Cv_max.setToolTip(
-            "Bagnold packing limit.\nIncrease if Cv > 0.50.")
+            "Upper bound of the allowed Cv (input check only: Cv must be < Cv_max).\n"
+            "It does not enter any formula and does not affect the result.\n"
+            "Increase it only if Cv ≥ 0.615 is needed.")
         fl.addRow("Cv_max:", self.spin_Cv_max)
         layout.addWidget(grp_conc)
 
