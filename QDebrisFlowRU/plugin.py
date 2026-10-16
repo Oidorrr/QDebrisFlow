@@ -30,6 +30,18 @@ class DebrisFlowPlugin:
         self.iface.addPluginToMenu("Селевые потоки", self.action)
 
     def unload(self):
+        # перезагрузка плагина не должна оставлять старый экземпляр диалога; идущий
+        # расчёт сначала отменяется, иначе его QThread был бы уничтожен во время работы
+        # (простое закрытие окна по-прежнему не прерывает расчёт — так задумано)
+        if self.dialog is not None:
+            for w in (getattr(self.dialog, "worker", None),
+                      getattr(self.dialog, "sweep_worker", None)):
+                if w is not None and w.isRunning():
+                    w.cancel()
+                    w.wait(30000)
+            self.dialog.close()
+            self.dialog.deleteLater()
+            self.dialog = None
         self.iface.removePluginMenu("Селевые потоки", self.action)
         self.iface.removeToolBarIcon(self.action)
         if self.action:
@@ -119,5 +131,7 @@ class DebrisFlowPlugin:
             renderer = QgsSingleBandPseudoColorRenderer(layer.dataProvider(), 1, shader)
             layer.setRenderer(renderer)
             layer.triggerRepaint()
-        except Exception:
-            pass
+        except Exception as e:
+            from qgis.core import QgsMessageLog, Qgis
+            QgsMessageLog.logMessage(f"стиль псевдоцвета не применён к {layer.name()}: "
+                                     f"{type(e).__name__}: {e}", "QDebrisFlow", Qgis.Warning)

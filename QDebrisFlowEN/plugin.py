@@ -30,6 +30,18 @@ class DebrisFlowPlugin:
         self.iface.addPluginToMenu("Debris Flows", self.action)
 
     def unload(self):
+        # a plugin reload must not leave the old dialog instance behind; a running
+        # worker is cancelled first, otherwise its QThread would be destroyed while running
+        # (merely closing the window still does not stop a simulation — by design)
+        if self.dialog is not None:
+            for w in (getattr(self.dialog, "worker", None),
+                      getattr(self.dialog, "sweep_worker", None)):
+                if w is not None and w.isRunning():
+                    w.cancel()
+                    w.wait(30000)
+            self.dialog.close()
+            self.dialog.deleteLater()
+            self.dialog = None
         self.iface.removePluginMenu("Debris Flows", self.action)
         self.iface.removeToolBarIcon(self.action)
         if self.action:
@@ -119,5 +131,7 @@ class DebrisFlowPlugin:
             renderer = QgsSingleBandPseudoColorRenderer(layer.dataProvider(), 1, shader)
             layer.setRenderer(renderer)
             layer.triggerRepaint()
-        except Exception:
-            pass
+        except Exception as e:
+            from qgis.core import QgsMessageLog, Qgis
+            QgsMessageLog.logMessage(f"pseudocolour style not applied to {layer.name()}: "
+                                     f"{type(e).__name__}: {e}", "QDebrisFlow", Qgis.Warning)
