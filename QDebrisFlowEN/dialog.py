@@ -868,6 +868,13 @@ class SweepWorker(QThread):
             obs_rows, obs_cols, obs_depths = self._extract_depth_points(
                 p["obs_pts"], geo_info)
             self.sweep_log.emit(f"Measurement points in domain: {len(obs_depths)}")
+            n_outside = len(p["obs_pts"]) - n_nonfinite - len(obs_depths)
+            if n_outside:
+                self.sweep_log.emit(f"⚠ {n_outside} depth point(s) outside the DEM skipped.")
+            if len(obs_depths) == 0:
+                self.sweep_log.emit(
+                    "⚠ No usable depth points: Cm = ΩTm, the depths are not taken into account\n"
+                    "  (check the depth field: empty, non-numeric or \"0,7\" values are skipped).")
 
             # ── LHS sampling ──────────────────────────────────────────────────
             n_runs    = p["n_runs"]
