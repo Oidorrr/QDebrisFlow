@@ -3471,8 +3471,10 @@ class SweepResultsDialog(QDialog):
             "a 95 % bootstrap interval; an interval that excludes 0 indicates an influence.<br>"
             "<b>Volume control</b> (second table): Cm residuals after a linear regression "
             "of Cm on log₁₀V, so that the dominant effect of the volume does not mask the "
-            "other parameters. This is the plugin's own procedure; its equivalence to "
-            "Barnhart et al. (2021, Section 7.5) has not been verified.")
+            "other parameters. This is the plugin's own procedure and it differs from "
+            "Barnhart et al. (2021, Section 7.5), who split each input into five bins and "
+            "show the smoothed mean Cm against the effective volume, without correlations "
+            "or regression.")
         note_q.setWordWrap(True)
         note_q.setStyleSheet("font-size:11px; color:#333; margin-bottom:4px")
         grp_q_lo.addWidget(note_q)
