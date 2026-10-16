@@ -1581,11 +1581,13 @@ class DebrisFlowDialog(QDialog):
             "Maximum internal time step [s].\n"
             "The actual step is ≤ dt_max and additionally limited by CFL.\n"
             "Do NOT confuse with the progress-bar update interval (60 s).\n\n"
-            "It matters only while the domain is dry or very shallow: once the\n"
-            "flow is established the CFL step is far smaller (for h = 1 m and a\n"
-            "5 m grid about 1 s). The first step is also CFL-checked with the\n"
-            "depth the inflow adds, so large dt_max values are not dangerous,\n"
-            "but they are useless: 1–5 s is enough for any grid.")
+            "It matters while the domain is dry or very shallow: once the flow is\n"
+            "established the CFL step is usually far smaller (for h = 1 m and a\n"
+            "5 m grid about 1 s). On 30–90 m grids, however, the CFL step can exceed\n"
+            "5 s, and then dt_max changes the result (test fan, 90 m grid: h_max\n"
+            "differs by up to 1.7 m between dt_max = 60 s and 5 s). The first step\n"
+            "is also CFL-checked with the depth the inflow adds.\n"
+            "Check: halve dt_max and compare h_max.")
         layout.addRow("Max. step dt_max:", self.spin_dtmax)
 
         self.spin_cfl = QDoubleSpinBox()
