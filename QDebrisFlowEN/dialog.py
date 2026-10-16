@@ -827,6 +827,10 @@ class SweepWorker(QThread):
 
             # ── Depth points ──────────────────────────────────────────────────
             self.sweep_log.emit("Reading depth points...")
+            n_nonfinite = sum(1 for _x, _y, _d in p["obs_pts"] if not np.isfinite(_d))
+            if n_nonfinite:
+                self.sweep_log.emit(
+                    f"⚠ {n_nonfinite} depth point(s) with a non-finite depth (NaN/inf) skipped.")
             obs_rows, obs_cols, obs_depths = self._extract_depth_points(
                 p["obs_pts"], geo_info)
             self.sweep_log.emit(f"Measurement points in domain: {len(obs_depths)}")
@@ -1146,6 +1150,9 @@ class SweepWorker(QThread):
 
         rows, cols, depths = [], [], []
         for x, y, d in pts:
+            # a NaN/inf depth would make Σ|d_obs| = NaN and zero Δo,c and Δu in every run
+            if not np.isfinite(d):
+                continue
             # floor (not int): points left of / above the grid are dropped
             col = int(np.floor((x - xmin) / dx))
             row = int(np.floor((ymax - y) / dy))
