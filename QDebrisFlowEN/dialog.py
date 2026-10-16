@@ -3063,7 +3063,7 @@ class DebrisFlowDialog(QDialog):
         """
         import sys
 
-        # Step 1: Numba directly (does not depend on the plugin sys.path)
+        # Step 1: import Numba directly (independent of the plugin package)
         try:
             import numba
             from numba import njit as _njit_test  # noqa: F401
@@ -3084,16 +3084,14 @@ class DebrisFlowDialog(QDialog):
                 "  • Missing llvmlite or LLVM DLL (Windows)\n"
                 "Try: pip install --upgrade numba")
 
-        # Step 2: check the flag in solver (only if the module is already imported)
-        for key in (f"{__package__}.core.solver", "core.solver"):
-            solver_mod = sys.modules.get(key)
-            if solver_mod is not None:
-                if not getattr(solver_mod, '_NUMBA_AVAILABLE', True):
-                    return False, (
-                        f"Numba {numba_version} was found but is disabled in solver.\n"
-                        "The plugin may have been loaded before Numba was installed.\n"
-                        "Restart QGIS and load the plugin again.")
-                break
+        # Step 2: check the flag in our solver (only if the module is already imported);
+        # a top-level `core.solver` of another plugin is not ours and is ignored
+        solver_mod = sys.modules.get(f"{__package__}.core.solver")
+        if solver_mod is not None and not getattr(solver_mod, '_NUMBA_AVAILABLE', True):
+            return False, (
+                f"Numba {numba_version} was found but is disabled in solver.\n"
+                "The plugin may have been loaded before Numba was installed.\n"
+                "Restart QGIS and load the plugin again.")
 
         return True, ""
 
