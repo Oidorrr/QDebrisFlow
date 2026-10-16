@@ -1596,10 +1596,10 @@ class DebrisFlowDialog(QDialog):
             "Courant–Friedrichs–Lewy number (CFL).\n"
             "Controls the numerical stability of the explicit LIA scheme.\n\n"
             "Recommended values:\n"
-            "  0.40–0.50 — conservative (Bates et al. 2010)\n"
+            "  0.40–0.50 — conservative (plugin recommendation)\n"
             "  0.60      — standard (default)\n"
-            "Allowed range 0.10–0.70: Bates et al. (2010) recommend a\n"
-            "coefficient of about 0.2–0.7 (as restated in later papers).")
+            "Allowed range 0.10–0.70: Bates et al. (2010, eq. 14) give a\n"
+            "coefficient in the range 0.2–0.7.")
         layout.addRow("CFL number:", self.spin_cfl)
 
         self.chk_face_lim = QCheckBox("Face-depth limiter  hf ≤ ½(hL+hR)")
