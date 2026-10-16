@@ -852,7 +852,9 @@ class SweepWorker(QThread):
                 dy           = float(geo_info["dy"]),
                 xmin         = float(geo_info.get("xmin", 0.0)),
                 ymax         = float(geo_info.get("ymax", 0.0)),
-                nodata       = float(geo_info.get("nodata") or -9999.0),
+                # read_dem_array already substitutes -9999 for a missing nodata;
+                # no `or` here: nodata = 0 must stay 0, as in the single run
+                nodata       = float(geo_info["nodata"]),
                 # Explicit conversion of each element → plain Python float
                 geotransform = tuple(float(x) for x in _gt),
                 # crs is NOT included — QgsCoordinateReferenceSystem is not picklable
