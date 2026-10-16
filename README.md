@@ -47,8 +47,10 @@ Sf = τy/(γm·h)  +  K·η·V/(8·γm·h²)  +  n²·V²/h^(4/3)
 - **Options** (Solver Settings): θ-weighting of the discharge (de Almeida et al.
   2012; default θ = 1 = original scheme, 0.8–0.9 damps oscillations in steep
   low-friction channels) and a face-depth limiter hf ≤ ½(hL+hR) (default ON as in
-  earlier versions; its source is unconfirmed — it was attributed to Almeida et al.
-  2012, eq. 2 — and it slows wetting fronts).
+  earlier versions). The limiter is the plugin's own modification: no literature
+  source was found (the LIA papers use hf = max(η) − max(z) without it). It slows
+  wetting fronts: on the test fan the arrival time is 8–13 % later at K = 2285 and
+  15–18 % later at K = 24.
 - **Inflow**: the exact volume of the piecewise-linear hydrograph is injected over
   every time step; the time step also respects CFL for the depth the inflow adds.
 - **Compute backend**: optional **Numba JIT**; the solver falls back to pure NumPy
