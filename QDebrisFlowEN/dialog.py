@@ -1899,7 +1899,9 @@ class DebrisFlowDialog(QDialog):
             "Optional polygon of the area where the inundation was mapped.\n"
             "Cells outside it are ignored in TP/FP/FN, so that flow in channels\n"
             "upstream of the mapped zone is not counted as over-prediction.\n"
-            "Empty = the whole DEM (previous behaviour).")
+            "Empty = the whole DEM (previous behaviour).\n"
+            "⚠ This is the polygon of the MAPPED territory, not the inundation polygon:\n"
+            "choosing the inundation polygon itself here makes FP ≡ 0.")
         fl_obs.addRow("Evaluation area (optional):", self.combo_eval_poly)
 
         self.combo_obs_pts = QgsMapLayerComboBox()
