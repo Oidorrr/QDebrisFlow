@@ -1,7 +1,8 @@
 """
 O'Brien & Julien (1985, 1988) rheological model — quadratic.
 
-Friction slope (FLO-2D):
+Friction slope (FLO-2D form with a constant Manning n; FLO-2D Simulating Mudflow
+Guidelines 2021, eq. 18, writes the third term with the turbulent-dispersive n_td):
     Sf = τy/(γm·h)  +  K·η·V/(8·γm·h²)  +  n²·V²/h^(4/3)
 
 Two modes for specifying τy and η
