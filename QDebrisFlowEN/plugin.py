@@ -50,7 +50,15 @@ class DebrisFlowPlugin:
             QMessageBox.critical(None, "Error", f"Failed to load layer:\n{path}")
             return
         DebrisFlowPlugin._apply_pseudocolour(layer, style)
-        QgsProject.instance().addMapLayer(layer)
+        # a re-run with the same prefix: drop the previous layer of this file instead of
+        # adding a duplicate that keeps the old file open
+        prj = QgsProject.instance()
+        norm = os.path.normcase(os.path.abspath(path))
+        old = [lid for lid, lyr in prj.mapLayers().items()
+               if os.path.normcase(os.path.abspath(lyr.source().split("|")[0])) == norm]
+        if old:
+            prj.removeMapLayers(old)
+        prj.addMapLayer(layer)
 
     @staticmethod
     def _apply_pseudocolour(layer, style: str) -> None:
