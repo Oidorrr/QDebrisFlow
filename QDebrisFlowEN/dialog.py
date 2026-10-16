@@ -2944,9 +2944,10 @@ class DebrisFlowDialog(QDialog):
             if "K_visc" in ob: self.spin_K.setValue(ob["K_visc"])
             if "rho_s"  in ob: self.spin_rho_s.setValue(ob["rho_s"])
             if "rho_w"  in ob: self.spin_rho_w.setValue(ob["rho_w"])
-            direct = ob.get("direct_mode", True)
-            self._radio_direct.setChecked(direct)
-            self._radio_exp.setChecked(not direct)
+            if "direct_mode" in ob:          # absent (older file): keep the current mode
+                direct = bool(ob["direct_mode"])
+                self._radio_direct.setChecked(direct)
+                self._radio_exp.setChecked(not direct)
             self._on_rheo_mode()
             self._update_hstop()
 
@@ -2977,6 +2978,14 @@ class DebrisFlowDialog(QDialog):
             self.chk_threshold.setChecked(thr_on)
             self.spin_threshold.setValue(thr_val)
             self.spin_threshold.setEnabled(thr_on)
+
+        # keys that change the result but are missing in older files: the current
+        # widget values stay in effect, so the user must see which ones they are
+        _missing = ([f"obrien.{k}" for k in ("K_visc", "rho_s", "rho_w", "direct_mode") if k not in ob]
+                    + [f"solver.{k}" for k in ("cfl_number", "face_depth_limiter", "theta") if k not in sv])
+        if _missing:
+            warnings.append("Not in the file (older version), the current values are kept: "
+                            + ", ".join(_missing))
 
         # --- Summary ---
         if warnings:
