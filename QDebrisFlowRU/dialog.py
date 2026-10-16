@@ -1236,7 +1236,7 @@ class SweepWorker(QThread):
         except Exception as e:
             # Fallback через QGIS geometry (медленно)
             self.sweep_log.emit(
-                f"  ⚠ GDAL polygon rasterize failed: {e} — fallback QGIS")
+                f"  ⚠ Растеризация полигона через GDAL не удалась: {e} — запасной путь QGIS")
             nx, ny = geo_info["nx"], geo_info["ny"]
             dx, dy = geo_info["dx"], geo_info["dy"]
             xmin, ymax = geo_info["xmin"], geo_info["ymax"]
@@ -2128,7 +2128,7 @@ class DebrisFlowDialog(QDialog):
         self.spin_seed.setRange(0, 9999); self.spin_seed.setValue(42)
         self.spin_seed.setToolTip(
             "Seed генератора — одинаковый seed → воспроизводимый результат.")
-        fl_cfg.addRow("Random seed:", self.spin_seed)
+        fl_cfg.addRow("Seed генератора:", self.spin_seed)
 
         # Параллельные ядра
         self.spin_n_workers = QSpinBox()
