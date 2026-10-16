@@ -86,6 +86,8 @@ def _read_dem_block(layer) -> tuple[np.ndarray, dict]:
 
 
 def rasterise_source(source_layer, geo_info: dict, default_depth: float) -> np.ndarray:
+    """Плагином не используется: диалог растеризует каждый объект источника сам
+    (SimulationWorker/SweepWorker._rasterise_feature). Оставлено для скриптов."""
     try:
         return _rasterise_gdal(source_layer, geo_info, default_depth)
     except Exception:

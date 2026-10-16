@@ -86,6 +86,8 @@ def _read_dem_block(layer) -> tuple[np.ndarray, dict]:
 
 
 def rasterise_source(source_layer, geo_info: dict, default_depth: float) -> np.ndarray:
+    """Not used by the plugin: the dialog rasterises every source feature itself
+    (SimulationWorker/SweepWorker._rasterise_feature). Kept for scripts."""
     try:
         return _rasterise_gdal(source_layer, geo_info, default_depth)
     except Exception:
