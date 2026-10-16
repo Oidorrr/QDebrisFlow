@@ -32,7 +32,7 @@ from qgis.PyQt.QtWidgets import (
 from qgis.PyQt.QtCore import Qt, QThread, pyqtSignal
 from qgis.PyQt.QtGui import QColor, QFont
 from qgis.core import (QgsMapLayerProxyModel, QgsWkbTypes, QgsGeometry, QgsPointXY,
-                       QgsCoordinateTransform, QgsProject)
+                       QgsCoordinateTransform, QgsCoordinateReferenceSystem, QgsProject)
 from qgis.gui import QgsMapLayerComboBox
 
 _H_MIN = 0.005   # мин. глубина мокрой ячейки [м] — скрыто от пользователя
@@ -128,9 +128,11 @@ def _runtime_info() -> dict:
 
 
 def _jsonable(obj):
-    """Параметры → JSON (слои → имя/источник/CRS, numpy → списки, функции отбрасываются)."""
+    """Параметры → JSON (слои → имя/источник/CRS, numpy → списки; функции и ключи,
+    начинающиеся с "_" (данные только для выполнения), отбрасываются)."""
     if isinstance(obj, dict):
-        return {str(k): _jsonable(v) for k, v in obj.items() if not callable(v)}
+        return {str(k): _jsonable(v) for k, v in obj.items()
+                if not callable(v) and not str(k).startswith("_")}
     if isinstance(obj, (list, tuple, set)):
         return [_jsonable(v) for v in obj]
     if isinstance(obj, np.ndarray):
@@ -141,6 +143,8 @@ def _jsonable(obj):
         return obj
     if hasattr(obj, "source") and hasattr(obj, "name") and hasattr(obj, "crs"):
         return {"name": obj.name(), "source": obj.source(), "crs": obj.crs().authid()}
+    if hasattr(obj, "authid") and hasattr(obj, "toWkt"):      # QgsCoordinateReferenceSystem
+        return obj.authid() or obj.toWkt()
     return str(obj)
 
 
@@ -226,6 +230,34 @@ def _check_dem_crs(dem_layer) -> str:
                 f"({QgsUnitTypes.toString(crs.mapUnits())}): солвер считает размер ячейки в метрах.\n"
                 "Перепроецируйте ЦМР в прямоугольную систему в метрах (например, UTM).")
     return ""
+
+
+def _detach_layers(params: dict, dem_layer) -> None:
+    """Главный поток: заменить объекты слоёв QGIS в параметрах воркера их именем/источником/CRS
+    (той же записью, что пишет _jsonable), чтобы рабочий поток не вызывал методы слоя,
+    который могут удалить из проекта во время расчёта.
+    ЦМР, которую GDAL не открывает, читается здесь через провайдер QGIS."""
+    from osgeo import gdal
+    from .qgis_runner import read_dem_array
+    params["dem_crs"] = QgsCoordinateReferenceSystem(dem_layer.crs())
+    gdal.PushErrorHandler("CPLQuietErrorHandler")
+    try:
+        readable = gdal.Open(dem_layer.source()) is not None
+    finally:
+        gdal.PopErrorHandler()
+    if not readable:
+        params["_dem_preloaded"] = read_dem_array(dem_layer)
+    for k, v in list(params.items()):
+        if hasattr(v, "source") and hasattr(v, "name") and hasattr(v, "crs"):
+            params[k] = _jsonable(v)
+
+
+def _read_job_dem(p: dict):
+    """Рабочий поток: ЦМР по пути и CRS, взятым в главном потоке (или прочитанная там заранее)."""
+    from .qgis_runner import read_dem_array
+    if p.get("_dem_preloaded") is not None:
+        return p["_dem_preloaded"]
+    return read_dem_array(None, source=p["dem_layer"]["source"], crs=p["dem_crs"])
 
 
 
@@ -444,20 +476,18 @@ class SimulationWorker(QThread):
             from .core.solver   import (TerrainGrid, SimulationConfig,
                                         SourceCondition, InflowSource,
                                         DebrisFlowSolver2D, hydrograph_volume)
-            from .qgis_runner   import read_dem_array, write_geotiff
+            from .qgis_runner   import write_geotiff
 
             p = self.params
 
             # ── DEM ───────────────────────────────────────────────────────────
+            # слои заменены именем/источником/CRS в главном потоке (_detach_layers)
             self.log_message.emit("Чтение DEM...")
-            dem, geo_info = read_dem_array(p["dem_layer"])
+            dem, geo_info = _read_job_dem(p)
 
-            # ── CRS check ─────────────────────────────────────────────────────
-            src_layer = p["source_layer"]
-            if p["dem_layer"].crs() != src_layer.crs():
-                self.log_message.emit(
-                    f"CRS: DEM={p['dem_layer'].crs().authid()}, "
-                    f"линии={src_layer.crs().authid()} — линии перепроецированы в CRS DEM.")
+            # ── CRS check (сравнение сделано в главном потоке) ────────────────
+            if p.get("_crs_note"):
+                self.log_message.emit(p["_crs_note"])
 
             # ── Растеризация по объектам → InflowSource на каждый ────────────
             # p["sources"] = list of {fid, name, times, q_vals}
@@ -647,8 +677,8 @@ class SimulationWorker(QThread):
                               eta_Pas=float(obrien.eta), rho_mixture=float(obrien.rho_mixture),
                               h_min=float(obrien.h_min)),
                 dem=dict(nx=int(geo_info["nx"]), ny=int(geo_info["ny"]), dx=float(geo_info["dx"]),
-                         dy=float(geo_info["dy"]), crs=p["dem_layer"].crs().authid(),
-                         source=p["dem_layer"].source()),
+                         dy=float(geo_info["dy"]), crs=p["dem_layer"]["crs"],
+                         source=p["dem_layer"]["source"]),
                 results=dict(n_steps=int(result.n_steps), t_simulated=float(result.t_simulated),
                              inflow_vol_m3=float(result.total_inflow_vol),
                              volume_balance=_jsonable(vb),
@@ -788,13 +818,12 @@ class SweepWorker(QThread):
 
         _csv_f = None
         try:
-            from .qgis_runner import read_dem_array
-
             p = self.params
 
             # ── DEM и растеризация источников ─────────────────────────────────
+            # слои заменены именем/источником/CRS в главном потоке (_detach_layers)
             self.sweep_log.emit("Чтение DEM...")
-            dem, geo_info = read_dem_array(p["dem_layer"])
+            dem, geo_info = _read_job_dem(p)
 
             self.sweep_log.emit("Растеризация источников...")
             src_cells = []
@@ -2481,6 +2510,11 @@ class DebrisFlowDialog(QDialog):
             rho_s           = self.spin_rho_s.value(),
             rho_w           = self.spin_rho_w.value(),
         )
+        try:
+            _detach_layers(params, dem_layer)
+        except Exception as e:
+            QMessageBox.critical(self, "DEM", f"Не удаётся прочитать DEM:\n{type(e).__name__}: {e}")
+            return
 
         self._sweep_results  = []
         self._sweep_best_pkg = None
@@ -3265,6 +3299,14 @@ class DebrisFlowDialog(QDialog):
             "h_threshold":      (self.spin_threshold.value()
                                  if self.chk_threshold.isChecked() else 0.0),
         }
+        if dem_layer.crs() != src_layer.crs():
+            params["_crs_note"] = (f"CRS: DEM={dem_layer.crs().authid()}, "
+                                   f"линии={src_layer.crs().authid()} — линии перепроецированы в CRS DEM.")
+        try:
+            _detach_layers(params, dem_layer)
+        except Exception as e:
+            QMessageBox.critical(self, "DEM", f"Не удаётся прочитать DEM:\n{type(e).__name__}: {e}")
+            return
 
         self.btn_run.setEnabled(False)
         self.btn_run.setText("⏳  Выполняется...")

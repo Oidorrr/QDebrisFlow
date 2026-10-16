@@ -11,10 +11,14 @@ class RotatedRasterError(ValueError):
     """The DEM geotransform has rotation/shear terms or a south-up row order."""
 
 
-def read_dem_array(layer) -> tuple[np.ndarray, dict]:
+def read_dem_array(layer, source=None, crs=None) -> tuple[np.ndarray, dict]:
+    """DEM array and geo_info. A worker thread passes layer=None with the source path
+    and CRS taken in the main thread, so that it never calls methods of the layer;
+    the QGIS-provider fallback needs the layer and is then not available."""
     try:
         from osgeo import gdal
-        source = layer.source()
+        if source is None:
+            source = layer.source()
         ds = gdal.Open(source)
         if ds is None:
             raise RuntimeError("GDAL cannot open source")
@@ -37,7 +41,7 @@ def read_dem_array(layer) -> tuple[np.ndarray, dict]:
             "ymin": ymax - ny * dy,
             "nodata": nodata if nodata is not None else -9999.0,
             "geotransform": gt,
-            "crs": layer.crs(),
+            "crs": crs if crs is not None else layer.crs(),
         }
         if nodata is not None:
             dem[dem == nodata] = nodata
@@ -45,6 +49,8 @@ def read_dem_array(layer) -> tuple[np.ndarray, dict]:
     except RotatedRasterError:
         raise
     except Exception:
+        if layer is None:
+            raise
         return _read_dem_block(layer)
 
 
