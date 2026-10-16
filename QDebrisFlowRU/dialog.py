@@ -2313,6 +2313,17 @@ class DebrisFlowDialog(QDialog):
         if not out_dir:
             QMessageBox.warning(
                 self, "Ошибка", "Укажите папку для результатов."); return
+        csv_name = self.edit_sweep_csv.text().strip() or "sweep_results.csv"
+        if os.path.exists(os.path.join(out_dir, csv_name)):
+            # CSV, <csv>_context.json и best_h_max_<csv>.tif прошлого анализа
+            # были бы перезаписаны без следа
+            if QMessageBox.question(
+                    self, "Файл существует",
+                    f"{os.path.join(out_dir, csv_name)} уже существует.\n"
+                    "Перезаписать результаты прошлого LHS-анализа\n"
+                    "(CSV, _context.json и растр лучшего h_max)?",
+                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+                return
 
         # Сборка источников из таблицы вкладки 1
         sources = []
@@ -2397,8 +2408,7 @@ class DebrisFlowDialog(QDialog):
             t_end           = float(self.spin_tend.value()),
             dt_max          = self.spin_dtmax.value(),
             out_dir         = out_dir,
-            csv_name        = (self.edit_sweep_csv.text().strip()
-                               or "sweep_results.csv"),
+            csv_name        = csv_name,
             cfl_number      = self.spin_cfl.value(),
             face_depth_limiter = self.chk_face_lim.isChecked(),
             theta           = self.spin_theta.value(),
