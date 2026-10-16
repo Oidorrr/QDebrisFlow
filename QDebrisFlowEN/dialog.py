@@ -3420,11 +3420,21 @@ class SweepResultsDialog(QDialog):
             tbl.setEditTriggers(QTableWidget.NoEditTriggers)
             tbl.verticalHeader().setVisible(False)
             for param_key, param_label in params_sens:
-                vals = [(float(r.get(param_key)), cm_of[id(r)])
+                vals = [(float(r.get(param_key)), cm_of[id(r)], r.get("run_id") or 0)
                         for r in ok_rows if r.get(param_key) is not None]
                 if len(vals) < 10:
                     continue
-                vals.sort(key=lambda x: x[0])
+                if np.ptp([v[0] for v in vals]) == 0:
+                    # the parameter was fixed: quintiles would only re-sort by Cm itself
+                    row_i = tbl.rowCount()
+                    tbl.insertRow(row_i)
+                    for c_i, txt in enumerate([param_label] + ["—"] * 5 + ["fixed", "—"]):
+                        cell = QTableWidgetItem(txt)
+                        cell.setTextAlignment(Qt.AlignCenter)
+                        tbl.setItem(row_i, c_i, cell)
+                    continue
+                # ties in x are ordered by run, not by Cm
+                vals.sort(key=lambda x: (x[0], x[2]))
                 n_q = len(vals)
                 q_size = n_q // 5
                 q_means = []
