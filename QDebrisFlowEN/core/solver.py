@@ -196,10 +196,11 @@ class SimulationConfig:
     cfl_number:        float    = 0.5
     output_interval:   float    = 60.0
     progress_callback: Optional[Callable[[float, float], None]] = None
-    # Face-depth limiter hf ≤ ½(hL+hR). Earlier attributed to Almeida et al. (2012), eq. 2,
-    # but this formula is not found in the published restatements of that paper; its
-    # source is unconfirmed. It slows wetting fronts (test fan: arrival +7…16 %) and
-    # amplifies channel pulsations. ON by default = behaviour of the published runs.
+    # Face-depth limiter hf ≤ ½(hL+hR): the plugin's own modification, no literature source
+    # was found (Bates 2010, Cozzolino 2019 and 2021 eq. 20, Landlab use hf = max(η) − max(z)
+    # without it; it was earlier attributed to Almeida et al. 2012, eq. 2). It slows wetting
+    # fronts (test fan: arrival with the limiter 8–13 % later at K = 2285, 15–18 % at K = 24)
+    # and amplifies channel pulsations. ON by default = behaviour of the published runs.
     face_depth_limiter: bool = True
     # θ-weighting of the discharge in the momentum update (de Almeida et al. 2012;
     # Cozzolino et al. 2021, eq. 19): θ·q + (1−θ)/2·(q_prev + q_next). Damps the LIA
