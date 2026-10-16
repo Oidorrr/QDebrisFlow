@@ -753,7 +753,7 @@ class DebrisFlowSolver2D:
         bnd = boundary_cells(self.terrain.mask_valid) & (self.h_max - self._h_init >= h_min)
         edge_h_max = float(self.h_max[bnd].max()) if bnd.any() else 0.0
         if edge_h_max >= h_min:
-            log.warning(f"Flow reached the closed domain boundary: h_max at the edge = "
+            log.warning(f"Flow reached a closed wall (domain edge or nodata cells): h_max at the wall = "
                         f"{edge_h_max:.3f} m — the fluid accumulates there instead of leaving")
         n_vcap = int(np.sum(self.V_max >= 30.0 - 1e-9))   # V is clipped at 30 m/s in _update_max
         if n_vcap:
