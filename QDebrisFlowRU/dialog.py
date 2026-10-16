@@ -801,9 +801,12 @@ class SweepWorker(QThread):
             for src_info in p["sources"]:
                 wkt = src_info.get("wkt")
                 if not wkt:
+                    self.sweep_log.emit(f"⚠ Источник {src_info['name']} не найден, пропуск.")
                     continue
                 rows, cols = self._rasterise_feature(wkt, geo_info)
                 if len(rows) == 0:
+                    self.sweep_log.emit(
+                        f"⚠ Источник {src_info['name']} не пересекает DEM, пропуск.")
                     continue
                 # источник целиком на nodata солвер отбрасывает: не включать его и в
                 # базовый объём (то же правило, что TerrainGrid.mask_valid)
@@ -2344,6 +2347,12 @@ class DebrisFlowDialog(QDialog):
         _crs_msg = _check_dem_crs(dem_layer)
         if _crs_msg:
             QMessageBox.warning(self, "CRS", _crs_msg); return
+        Cv = self.spin_Cv.value(); Cv_max = self.spin_Cv_max.value()
+        if Cv >= Cv_max:
+            # иначе все прогоны по одному падают с ValueError
+            QMessageBox.warning(self, "Параметр",
+                                f"Cv ({Cv}) должен быть < Cv_max ({Cv_max}).\n"
+                                "(Вкладка «Параметры O'Brien»)"); return
 
         err = []
         if self.chk_vol_vary.isChecked() and \
