@@ -21,7 +21,8 @@ Mode 2 — EXPONENTIAL COEFFICIENTS (O'Brien & Julien 1988):
     1 Pa·s = 10 poises"; coefficients in dynes/cm² and poises must be × 0.1.
     Default alpha/beta below: source not established (τy ≈ 0.8 Pa, η ≈ 26 Pa·s at Cv = 0.40).
 
-Switching: if tau_yield_direct > 0 → Mode 1, otherwise → Mode 2.
+Switching: the mode is set by direct_mode (True → Mode 1, False → Mode 2); with
+direct_mode=None the old rule applies: tau_yield_direct > 0 → Mode 1, otherwise → Mode 2.
 """
 
 from __future__ import annotations
@@ -47,7 +48,7 @@ class OBrienParameters:
 
     # ── Mode 1: direct input of τy and η ─────────────────────────────────────
     tau_yield_direct: float = 0.0
-    """Yield stress [Pa]. If > 0 — used directly (Mode 1)."""
+    """Yield stress [Pa], used directly in Mode 1 (τy = 0 is allowed there: a purely viscous mixture)."""
 
     eta_direct: float = 0.0
     """Mixture viscosity [Pa·s]. Used together with tau_yield_direct."""
