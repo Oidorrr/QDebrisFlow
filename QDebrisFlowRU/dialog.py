@@ -828,6 +828,10 @@ class SweepWorker(QThread):
 
             # ── Точки глубин ──────────────────────────────────────────────────
             self.sweep_log.emit("Чтение точек глубин...")
+            n_nonfinite = sum(1 for _x, _y, _d in p["obs_pts"] if not np.isfinite(_d))
+            if n_nonfinite:
+                self.sweep_log.emit(
+                    f"⚠ Пропущено точек с нечисловой глубиной (NaN/inf): {n_nonfinite}.")
             obs_rows, obs_cols, obs_depths = self._extract_depth_points(
                 p["obs_pts"], geo_info)
             self.sweep_log.emit(f"Точек замеров в домене: {len(obs_depths)}")
@@ -1147,6 +1151,9 @@ class SweepWorker(QThread):
 
         rows, cols, depths = [], [], []
         for x, y, d in pts:
+            # глубина NaN/inf дала бы Σ|d_obs| = NaN и обнулила Δo,c и Δu во всех прогонах
+            if not np.isfinite(d):
+                continue
             # floor (а не int): точки левее/выше сетки отбрасываются
             col = int(np.floor((x - xmin) / dx))
             row = int(np.floor((ymax - y) / dy))
