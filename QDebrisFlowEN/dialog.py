@@ -214,6 +214,16 @@ def _check_dem_crs(dem_layer) -> str:
         return (f"The DEM is in a geographic CRS ({crs.authid()}): its cell size is in degrees,\n"
                 "not metres, and the simulation would be meaningless.\n"
                 "Reproject the DEM to a projected CRS in metres (e.g. UTM) and run again.")
+    if not crs.isValid():
+        return ("The DEM has no coordinate reference system: its cell size and the\n"
+                "reprojection of the vector layers cannot be checked.\n"
+                "Assign the correct projected CRS in metres (Layer Properties → Source) and run again.")
+    from qgis.core import QgsUnitTypes
+    if crs.mapUnits() != QgsUnitTypes.DistanceMeters:
+        # the solver takes the cell size and depths as metres (feet would give a 10.76× area)
+        return (f"The DEM CRS ({crs.authid()}) is not in metres "
+                f"({QgsUnitTypes.toString(crs.mapUnits())}): the solver treats the cell size as metres.\n"
+                "Reproject the DEM to a projected CRS in metres (e.g. UTM) and run again.")
     return ""
 
 
