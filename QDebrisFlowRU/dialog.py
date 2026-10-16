@@ -3265,7 +3265,8 @@ class DebrisFlowDialog(QDialog):
                                 f"Не удаётся создать папку результатов или записать в неё:\n{out_dir}\n\n{e}")
             return
 
-        prefix = re.sub(r"[^a-zA-Z0-9_\-]", "_",
+        # \w для str — юникодный: кириллические префиксы сохраняются (раньше схлопывались в "___")
+        prefix = re.sub(r"[^\w\-]", "_",
                         self.edit_prefix.text().strip())
         if not prefix:
             QMessageBox.warning(self, "Нет данных",

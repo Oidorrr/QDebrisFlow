@@ -50,7 +50,15 @@ class DebrisFlowPlugin:
             QMessageBox.critical(None, "Ошибка", f"Не удалось загрузить слой:\n{path}")
             return
         DebrisFlowPlugin._apply_pseudocolour(layer, style)
-        QgsProject.instance().addMapLayer(layer)
+        # повторный запуск с тем же префиксом: убрать прежний слой этого файла, а не
+        # добавлять дубликат, который держит старый файл открытым
+        prj = QgsProject.instance()
+        norm = os.path.normcase(os.path.abspath(path))
+        old = [lid for lid, lyr in prj.mapLayers().items()
+               if os.path.normcase(os.path.abspath(lyr.source().split("|")[0])) == norm]
+        if old:
+            prj.removeMapLayers(old)
+        prj.addMapLayer(layer)
 
     @staticmethod
     def _apply_pseudocolour(layer, style: str) -> None:

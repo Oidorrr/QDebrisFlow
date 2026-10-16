@@ -3264,7 +3264,8 @@ class DebrisFlowDialog(QDialog):
                                 f"Cannot create or write to the output folder:\n{out_dir}\n\n{e}")
             return
 
-        prefix = re.sub(r"[^a-zA-Z0-9_\-]", "_",
+        # \w is Unicode for str: Cyrillic prefixes are kept (they used to collapse to "___")
+        prefix = re.sub(r"[^\w\-]", "_",
                         self.edit_prefix.text().strip())
         if not prefix:
             QMessageBox.warning(self, "No data",
