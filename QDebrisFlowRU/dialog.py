@@ -389,8 +389,8 @@ class HydrographEditorDialog(QDialog):
             times, qs = _read_hydrograph_csv(fname)
             self.table.setRowCount(len(times))
             for i, (t, q) in enumerate(zip(times, qs)):
-                self.table.setItem(i, 0, QTableWidgetItem(f"{t:.1f}"))
-                self.table.setItem(i, 1, QTableWidgetItem(f"{q:.3f}"))
+                self.table.setItem(i, 0, QTableWidgetItem(f"{t:.10g}"))
+                self.table.setItem(i, 1, QTableWidgetItem(f"{q:.10g}"))
             self.lbl_csv.setText(os.path.basename(fname))
             self.lbl_csv.setStyleSheet("color:green")
             self.combo_type.setCurrentIndex(1)
@@ -409,8 +409,8 @@ class HydrographEditorDialog(QDialog):
             q_vals = data.get("q_vals", [])
             self.table.setRowCount(max(len(times), 2))
             for i, (t, q) in enumerate(zip(times, q_vals)):
-                self.table.setItem(i, 0, QTableWidgetItem(f"{t:.1f}"))
-                self.table.setItem(i, 1, QTableWidgetItem(f"{q:.3f}"))
+                self.table.setItem(i, 0, QTableWidgetItem(f"{t:.10g}"))
+                self.table.setItem(i, 1, QTableWidgetItem(f"{q:.10g}"))
         self._update_sections()
 
     def _on_ok(self):
@@ -428,19 +428,27 @@ class HydrographEditorDialog(QDialog):
             return {"type": "const", "q_const": q,
                     "times": [0.0, 1e9], "q_vals": [q, q]}
         # Таблица / CSV
+        import math
         rows, bad = [], []
         for i in range(self.table.rowCount()):
             ti = self.table.item(i, 0)
             qi = self.table.item(i, 1)
-            if ti is None or qi is None or not ti.text().strip() or not qi.text().strip():
-                continue
+            t_txt = ti.text().strip() if ti is not None else ""
+            q_txt = qi.text().strip() if qi is not None else ""
+            if not t_txt and not q_txt:
+                continue                      # пустая строка
             try:
-                rows.append((float(ti.text().strip().replace(",", ".")),
-                             float(qi.text().strip().replace(",", "."))))
-            except ValueError:
+                t, q = float(t_txt.replace(",", ".")), float(q_txt.replace(",", "."))
+            except ValueError:                # в том числе строка, где заполнена только одна ячейка
                 bad.append(i + 1)
+                continue
+            if not (math.isfinite(t) and math.isfinite(q)):
+                bad.append(i + 1)             # nan / inf
+                continue
+            rows.append((t, q))
         if bad:
-            raise ValueError(f"Строки {bad}: не число (цифры, например 12.5 или 12,5).")
+            raise ValueError(f"Строки {bad}: не конечное число или неполная строка "
+                             "(цифры в обеих ячейках, например 12.5 или 12,5).")
         if any(q < 0 for _, q in rows):
             raise ValueError("Расход Q не может быть отрицательным.")
         if any(t < 0 for t, _ in rows):
@@ -454,6 +462,8 @@ class HydrographEditorDialog(QDialog):
             raise ValueError(
                 "Нужно минимум 2 строки с числами.\n"
                 "Пример: (0, 0) и (300, 100).")
+        if not any(q > 0 for q in q_vals):
+            raise ValueError("Расход Q равен нулю во всех строках: у гидрографа нет объёма.")
         return {"type": "table", "times": times, "q_vals": q_vals,
                 "q_const": 0.0}
 
@@ -886,7 +896,7 @@ class SweepWorker(QThread):
                 # объём, реально вводимый на [0, t_end] (в т.ч. для постоянного Q)
                 base_vol += _hydro_volume(sc["times"], sc["base_q_vals"],
                                           0.0, float(p["t_end"]))
-            if base_vol <= 0:
+            if not (base_vol > 0):          # NaN тоже отклоняется
                 self.sweep_error.emit(
                     "Базовый объём = 0. Проверьте гидрографы источников.")
                 return
