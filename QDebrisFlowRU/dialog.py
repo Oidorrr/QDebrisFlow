@@ -3119,6 +3119,17 @@ class DebrisFlowDialog(QDialog):
             QMessageBox.warning(self, "Нет данных",
                                 "Укажите папку для результатов.\n"
                                 "(Вкладка «Выходные данные»)"); return
+        # проверить папку до расчёта: ошибка после него потеряла бы все результаты
+        try:
+            os.makedirs(out_dir, exist_ok=True)
+            _test = os.path.join(out_dir, f".qdebrisflow_write_test_{os.getpid()}")
+            with open(_test, "w"):
+                pass
+            os.remove(_test)
+        except OSError as e:
+            QMessageBox.warning(self, "Папка результатов",
+                                f"Не удаётся создать папку результатов или записать в неё:\n{out_dir}\n\n{e}")
+            return
 
         prefix = re.sub(r"[^a-zA-Z0-9_\-]", "_",
                         self.edit_prefix.text().strip())
