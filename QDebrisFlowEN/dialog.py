@@ -626,7 +626,8 @@ class SimulationWorker(QThread):
                     f"{result.edge_h_max:.3f} m).\n"
                     "  The boundary is a closed wall: the fluid accumulates there instead of\n"
                     "  leaving, so h_max/h_final near the edge are overestimated.\n"
-                    "  Enlarge the DEM beyond the expected runout.")
+                    "  Nodata cells inside the DEM are walls too and also trigger this warning.\n"
+                    "  Enlarge the DEM beyond the expected runout (or fill the nodata holes).")
             if result.n_vcap_cells:
                 self.log_message.emit(
                     f"\n⚠ The velocity reached the 30 m/s cap in {result.n_vcap_cells} cells.\n"
