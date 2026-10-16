@@ -29,8 +29,10 @@ def fill_sinks(dem: np.ndarray, nodata: float = -9999.0,
         Filled DEM array [m], same shape.
     """
     ny, nx = dem.shape
-    valid = dem != nodata
-    filled = dem.copy()
+    valid = np.isfinite(dem) & (dem != nodata)   # NaN nodata too
+    # nodata (finite sentinel or NaN) works as an outlet; with NaN it would spread through
+    # min()/max(), so invalid cells hold -inf here and get their value back at the end
+    filled = np.where(valid, dem, -np.inf)
 
     # Initialise: boundary cells keep their elevation,
     # interior cells set to very high value (will be lowered)
@@ -85,6 +87,7 @@ def fill_sinks(dem: np.ndarray, nodata: float = -9999.0,
         if iteration % 100 == 0:
             print(f"  fill_sinks: iteration {iteration}...")
 
+    filled[~valid] = dem[~valid]
     n_filled = np.sum((filled > dem) & valid)
     print(f"fill_sinks: {n_filled} cells modified in {iteration} iterations")
     return filled
@@ -95,12 +98,13 @@ def compute_flow_accumulation(dem_filled: np.ndarray,
     """
     Compute D8 flow accumulation from a filled DEM.
     Useful for identifying main channel paths.
+    Assumes square cells (dx = dy): the D8 distances are 1 and sqrt(2) cells.
 
     Returns:
         accum: Flow accumulation array (number of upstream cells).
     """
     ny, nx = dem_filled.shape
-    valid = dem_filled != nodata
+    valid = np.isfinite(dem_filled) & (dem_filled != nodata)
 
     # D8 flow direction: find steepest downslope neighbour
     dirs = [(-1,-1),(-1,0),(-1,1),(0,-1),(0,1),(1,-1),(1,0),(1,1)]
@@ -149,7 +153,7 @@ def check_dem_quality(dem: np.ndarray, nodata: float = -9999.0) -> dict:
 
     Returns dict with potential issues flagged.
     """
-    valid = dem != nodata
+    valid = np.isfinite(dem) & (dem != nodata)
     dem_v = dem[valid]
 
     issues = []
