@@ -4,7 +4,8 @@
 
 Numba is used if it is installed and compatible with NumPy.
 If not (for example, NumPy 1.20 in QGIS 3.32) — pure NumPy
-is used automatically. The physics and the results are identical.
+is used automatically. The physics is the same; the results agree to round-off
+(fastmath and the order of operations).
 
 Scheme:   Local Inertial Approximation (Bates et al., 2010)
 Rheology: O'Brien & Julien (1985, 1988)
@@ -325,7 +326,7 @@ if _NUMBA_AVAILABLE:
                 if aF > yi:
                     Qy_new[i, j] = F * (1. - yi / aF) / d
 
-        # Outflow limiter — two-pass scheme (identical to the NumPy backend)
+        # Outflow limiter — same two-pass scheme as the NumPy backend
         # Pass 1: coefficient sc for each cell
         sc = np.ones((ny, nx), dtype=np.float64)
         for i in range(ny):
