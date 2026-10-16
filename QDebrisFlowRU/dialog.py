@@ -2271,6 +2271,11 @@ class DebrisFlowDialog(QDialog):
             QMessageBox.warning(
                 self, "Ошибка",
                 "Загрузите источники — нажмите «Загрузить объекты» (Вкладка 1)."); return
+        if src_layer.id() != self._hydro_layer_id:
+            QMessageBox.warning(
+                self, "Ошибка",
+                "Таблица источников относится к другому линейному слою.\n"
+                "Нажмите «Загрузить объекты» для выбранного слоя (Вкладка 1)."); return
         if obs_poly is None:
             QMessageBox.warning(
                 self, "Ошибка",
@@ -3078,6 +3083,13 @@ class DebrisFlowDialog(QDialog):
             QMessageBox.warning(
                 self, "Источники не загружены",
                 "Нажмите «Загрузить объекты» чтобы загрузить линии источника."); return
+        if src_layer.id() != self._hydro_layer_id:
+            # таблица и гидрографы относятся к другому слою: по fid взялись бы
+            # геометрии нового слоя со старыми именами и гидрографами
+            QMessageBox.warning(
+                self, "Источники не загружены",
+                "Таблица источников относится к другому линейному слою.\n"
+                "Нажмите «Загрузить объекты» для выбранного слоя."); return
 
         out_dir = self.edit_outdir.text().strip()
         if not out_dir:
