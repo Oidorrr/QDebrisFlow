@@ -3,9 +3,9 @@ core/sweep_runner.py
 ====================
 Executor module for a single LHS run.
 
-Deliberately does NOT import PyQt5, QGIS or dialog.py —
-this allows the function to run in child processes
-(multiprocessing.Pool) without initialising QGIS.
+Deliberately does NOT import PyQt5, QGIS or dialog.py: the function is called
+from SweepWorker directly (1 worker) or from ThreadPoolExecutor threads (> 1);
+multiprocessing.Pool is not used.
 
 Public API:
     run_one_sample(args: dict) -> dict
@@ -109,13 +109,13 @@ def _compute_sweep_metrics(
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Single-run worker — called in a child process
+# Single-run worker — called from SweepWorker or its worker threads
 # ──────────────────────────────────────────────────────────────────────────────
 
 def run_one_sample(args: dict) -> dict:
     """
-    Performs a single LHS run. Called in a child process
-    (multiprocessing.Pool) or directly (sequential mode).
+    Performs a single LHS run. Called directly (sequential mode)
+    or from a ThreadPoolExecutor thread (parallel mode).
 
     args parameters (all — serialisable types):
         plugin_dir      str         — path to the plugin directory
