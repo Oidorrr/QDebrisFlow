@@ -1375,7 +1375,9 @@ class DebrisFlowDialog(QDialog):
         self.spin_Cv_max.setRange(0.60, 0.90); self.spin_Cv_max.setValue(0.615)
         self.spin_Cv_max.setDecimals(3)
         self.spin_Cv_max.setToolTip(
-            "Предел упаковки Бэгнолда.\nУвеличить если Cv > 0.50.")
+            "Верхняя граница допустимого Cv (только проверка ввода: Cv должно быть < Cv_max).\n"
+            "Ни в одну формулу не входит и на результат не влияет.\n"
+            "Увеличивать, только если нужно Cv ≥ 0.615.")
         fl.addRow("Cv_max:", self.spin_Cv_max)
         layout.addWidget(grp_conc)
 
