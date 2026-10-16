@@ -822,9 +822,9 @@ class SimulationWorker(QThread):
 
 class SweepWorker(QThread):
     """
-    Sequential LHS-sweep in a background QThread.
-    A parallel mp.Pool is incompatible with the QGIS Qt event loop,
-    so runs proceed one after another, but the UI is not blocked.
+    LHS sweep in a background QThread: runs proceed one after another with 1 worker,
+    or in a ThreadPoolExecutor with > 1 workers (mp.Pool is incompatible with the
+    QGIS Qt event loop and is not used); the UI is not blocked.
     Signals:
         run_done(dict)    — result of a single run
         sweep_log(str)    — text message
@@ -1287,11 +1287,12 @@ class SweepWorker(QThread):
 
 class DebrisFlowDialog(QDialog):
     """
-    Simulation dialog with four tabs:
+    Simulation dialog with five tabs:
       1. Layers and sources — DEM, line layer, source table
       2. O'Brien Parameters — rheology
       3. Solver Settings    — time parameters
       4. Output             — folder, prefix, layer selection
+      5. LHS analysis       — calibration against observations, sensitivity
     """
 
     def __init__(self, iface):
