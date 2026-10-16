@@ -2076,7 +2076,7 @@ class DebrisFlowDialog(QDialog):
         self.edit_sweep_csv = QLineEdit("sweep_results.csv")
         self.edit_sweep_csv.setToolTip(
             "Имя CSV-файла (сохраняется в папке результатов).\n"
-            "Содержит все 4 параметра + метрики для каждого сценария.")
+            "Содержит все 5 параметров (V, τy, η, n, K) + метрики для каждого сценария.")
         fl_cfg.addRow("Файл CSV:", self.edit_sweep_csv)
         lo.addWidget(grp_cfg)
 
