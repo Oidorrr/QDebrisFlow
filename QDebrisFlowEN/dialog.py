@@ -2270,6 +2270,11 @@ class DebrisFlowDialog(QDialog):
             QMessageBox.warning(
                 self, "Error",
                 "Load the sources — click \"Load features\" (Tab 1)."); return
+        if src_layer.id() != self._hydro_layer_id:
+            QMessageBox.warning(
+                self, "Error",
+                "The source table belongs to another line layer.\n"
+                "Click \"Load features\" for the selected layer (Tab 1)."); return
         if obs_poly is None:
             QMessageBox.warning(
                 self, "Error",
@@ -3077,6 +3082,13 @@ class DebrisFlowDialog(QDialog):
             QMessageBox.warning(
                 self, "Sources not loaded",
                 "Click \"Load features\" to load the source lines."); return
+        if src_layer.id() != self._hydro_layer_id:
+            # the table and hydrographs belong to another layer: the fids would pick
+            # geometries of the new layer with the old names and hydrographs
+            QMessageBox.warning(
+                self, "Sources not loaded",
+                "The source table belongs to another line layer.\n"
+                "Click \"Load features\" for the selected layer."); return
 
         out_dir = self.edit_outdir.text().strip()
         if not out_dir:
