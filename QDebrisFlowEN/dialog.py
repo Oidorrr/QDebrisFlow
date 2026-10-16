@@ -1535,9 +1535,8 @@ class DebrisFlowDialog(QDialog):
         self.spin_K.setToolTip(
             "K — dimensionless shape coefficient of the cross-section\n"
             "in the viscous term Sf_visc = K·η·V / (8·γm·h²).\n\n"
-            "Theoretical values (O'Brien & Julien 1985):\n"
-            "  K = 24 — wide rectangular channel (Bingham flow)\n"
-            "  K = 8  — pipe flow\n\n"
+            "Theoretical value (O'Brien & Julien 1985):\n"
+            "  K = 24 — wide rectangular channel (Bingham flow)\n\n"
             "FLO-2D Mudflow Guidelines: K grows with roughness and irregular\n"
             "cross-sections up to ~50 000; K = 2285 (calibrated on Rudd Creek)\n"
             "is used for most urban studies.\n"
