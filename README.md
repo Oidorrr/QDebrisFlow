@@ -132,7 +132,10 @@ QDebrisFlow/
 
 - **QGIS ≥ 3.16** (provides PyQt5, the QGIS Python API, and GDAL/OGR)
 - **NumPy** (bundled with QGIS)
-- **Numba** — required to run simulations from the plugin GUI
+- **Numba** — required to run simulations from the plugin GUI; the solver enables
+  it only with NumPy ≥ 1.22 (for Numba ≥ 0.56), otherwise it falls back to NumPy and
+  the GUI refuses to run with a message naming both versions
+- Tested with QGIS 3.44.8 LTR (Python 3.12, NumPy 2.4, Numba 0.65.1, GDAL 3.12)
 
 See [`requirements.txt`](requirements.txt).
 

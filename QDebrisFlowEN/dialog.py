@@ -3207,6 +3207,12 @@ class DebrisFlowDialog(QDialog):
         # a top-level `core.solver` of another plugin is not ours and is ignored
         solver_mod = sys.modules.get(f"{__package__}.core.solver")
         if solver_mod is not None and not getattr(solver_mod, '_NUMBA_AVAILABLE', True):
+            np_min = getattr(solver_mod, "np_min", None)
+            if np_min and tuple(int(x) for x in np.__version__.split(".")[:2]) < tuple(np_min):
+                return False, (
+                    f"Numba {numba_version} needs NumPy ≥ {'.'.join(map(str, np_min))}, but NumPy "
+                    f"{np.__version__} is installed, so the solver uses NumPy.\n"
+                    "Update NumPy or install a Numba version compatible with it.")
             return False, (
                 f"Numba {numba_version} was found but is disabled in solver.\n"
                 "The plugin may have been loaded before Numba was installed.\n"
