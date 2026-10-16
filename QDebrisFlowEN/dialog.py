@@ -2119,10 +2119,9 @@ class DebrisFlowDialog(QDialog):
         self.combo_depth_field.clear()
         if layer is None:
             return
-        numeric = {"double", "real", "float", "integer", "int64", "int",
-                   "int2", "int4", "int8", "numeric", "decimal"}
+        # isNumeric() also covers Integer64 (GPKG/SHP); the feature id "fid" is never a depth
         for field in layer.fields():
-            if field.typeName().lower().split("(")[0] in numeric:
+            if field.isNumeric() and field.name().lower() != "fid":
                 self.combo_depth_field.addItem(field.name())
         # Fallback: add all fields if there are no numeric ones
         if self.combo_depth_field.count() == 0:
