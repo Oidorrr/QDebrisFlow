@@ -869,6 +869,13 @@ class SweepWorker(QThread):
             obs_rows, obs_cols, obs_depths = self._extract_depth_points(
                 p["obs_pts"], geo_info)
             self.sweep_log.emit(f"Точек замеров в домене: {len(obs_depths)}")
+            n_outside = len(p["obs_pts"]) - n_nonfinite - len(obs_depths)
+            if n_outside:
+                self.sweep_log.emit(f"⚠ Пропущено точек глубины вне ЦМР: {n_outside}.")
+            if len(obs_depths) == 0:
+                self.sweep_log.emit(
+                    "⚠ Нет годных точек глубины: Cm = ΩTm, глубины не учитываются\n"
+                    "  (проверьте поле глубины: пустые, нечисловые значения и «0,7» пропускаются).")
 
             # ── LHS выборка ───────────────────────────────────────────────────
             n_runs    = p["n_runs"]
