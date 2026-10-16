@@ -2931,7 +2931,18 @@ class DebrisFlowDialog(QDialog):
         # hydrographs are keyed by fid, which is only unique within one layer:
         # a different layer must not inherit them
         if layer.id() != self._hydro_layer_id:
-            self._hydro_data = {}
+            # hydrographs from a JSON whose line layer was not found by name: offer to keep
+            # them for the selected layer instead of silently replacing them by 100 m³/s
+            keep = (self._hydro_layer_id is None and bool(self._hydro_data)
+                    and all(layer.getFeature(fid).isValid() for fid in self._hydro_data)
+                    and QMessageBox.question(
+                        self, "Hydrographs from the file",
+                        f"Hydrographs loaded from the parameter file ({len(self._hydro_data)}) "
+                        f"are not bound to a layer.\nApply them to the features of \"{layer.name()}\" "
+                        "with the same IDs?",
+                        QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes) == QMessageBox.Yes)
+            if not keep:
+                self._hydro_data = {}
             self._hydro_layer_id = layer.id()
         feats = list(layer.getFeatures())
         if not feats:
