@@ -1605,10 +1605,12 @@ class DebrisFlowDialog(QDialog):
         self.chk_face_lim.setChecked(True)
         self.chk_face_lim.setToolTip(
             "Limits the flow depth on a cell face to the mean depth of the two cells.\n"
-            "Slows the front on dry slopes (test fan: arrival time +7…16 %)\n"
+            "This is the plugin's own modification: no literature source was found\n"
+            "(the LIA papers use hf = max(η) − max(z) without it).\n"
+            "Slows the front on dry slopes (test fan: arrival time with the limiter\n"
+            "8–13 % later at K = 2285 and 15–18 % later at K = 24)\n"
             "and amplifies pulsations in steep channels.\n"
-            "The source of this formula is unconfirmed (it was attributed to\n"
-            "Almeida et al. 2012, eq. 2). ON by default — as in the published runs.")
+            "ON by default — as in the published runs.")
         layout.addRow(self.chk_face_lim)
 
         self.spin_theta = QDoubleSpinBox()
