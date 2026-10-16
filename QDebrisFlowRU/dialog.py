@@ -2237,7 +2237,11 @@ class DebrisFlowDialog(QDialog):
                 warnings.append(f"Слой «{name}» не найден в проекте.")
 
         _set_layer(self.combo_obs_poly, d.get("obs_poly_name", ""))
-        _set_layer(self.combo_eval_poly, d.get("eval_poly_name", ""))
+        if d.get("eval_poly_name"):
+            _set_layer(self.combo_eval_poly, d["eval_poly_name"])
+        else:
+            # необязательный слой: пустое имя означает «без области оценки», а не «оставить прежнюю»
+            self.combo_eval_poly.setLayer(None)
         _set_layer(self.combo_obs_pts,  d.get("obs_pts_name",  ""))
         if d.get("depth_field"):
             idx = self.combo_depth_field.findText(d["depth_field"])
