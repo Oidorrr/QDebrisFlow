@@ -947,7 +947,7 @@ class SweepWorker(QThread):
             _csv_f = open(csv_path, "w", newline="", encoding="utf-8")
             _csv_w = _csv.DictWriter(_csv_f, fieldnames=["run_id", "status", "vol_m3", "vol_in_m3", "tau_yield_Pa", "eta_Pas", "manning_n",
                        "K_visc", "h_max_m", "edge_h_max_m", "vcap_cells", "wall_s", "TP", "FP",
-                       "FN", "omega_Tm", "delta_o_c", "delta_u", "Cm", "depth_bias_m", "eta_min"],
+                       "FN", "omega_Tm", "delta_o_c", "delta_u", "Cm", "depth_bias_m", "eta_remaining_min"],
                                      extrasaction="ignore", restval="")
             _csv_w.writeheader(); _csv_f.flush()
             from .core import solver as _solver_mod
@@ -973,7 +973,7 @@ class SweepWorker(QThread):
                 eta_min   = round(
                     (time.time() - t_start) / max(completed, 1)
                     * (n_runs - completed) / 60, 1)
-                row_data["eta_min"] = eta_min
+                row_data["eta_remaining_min"] = eta_min   # оставшееся время [мин], а не η
                 _csv_w.writerow(row_data); _csv_f.flush()
 
                 self.run_done.emit(row_data)
@@ -1055,7 +1055,7 @@ class SweepWorker(QThread):
                                 h_max=None,
                                 **{k: None for k in [
                                     "vol_m3","vol_in_m3","tau_yield_Pa","eta_Pas","manning_n",
-                                    "K_visc","h_max_m","edge_h_max_m","vcap_cells","wall_s","eta_min",
+                                    "K_visc","h_max_m","edge_h_max_m","vcap_cells","wall_s","eta_remaining_min",
                                     "TP","FP","FN","omega_Tm",
                                     "delta_o_c","delta_u","Cm","depth_bias_m"]},
                             )
@@ -2488,16 +2488,19 @@ class DebrisFlowDialog(QDialog):
         self.progress_bar.setValue(0)
         self.btn_sweep_run.setEnabled(False)
         self.btn_sweep_cancel.setEnabled(True)
+        def _rtxt(chk, s_min, s_max, s_fix, fmt):
+            """Диапазон варьируемого параметра или его фиксированное значение (то, что реально берётся)."""
+            if chk.isChecked():
+                return f"{s_min.value():{fmt}} – {s_max.value():{fmt}}"
+            return f"{s_fix.value():{fmt}} (фиксирован)"
+
         self.sweep_log_box.append(
             f"Запуск LHS-анализа: {params['n_runs']} прогонов…\n"
-            f"Объём: {self.spin_vol_min.value():.0f} – "
-            f"{self.spin_vol_max.value():.0f} м³\n"
-            f"τy: {self.spin_tau_min.value():.0f} – "
-            f"{self.spin_tau_max.value():.0f} Па\n"
-            f"η: {self.spin_eta_min.value():.1f} – "
-            f"{self.spin_eta_max.value():.1f} Па·с\n"
-            f"n: {self.spin_n_min.value():.3f} – "
-            f"{self.spin_n_max.value():.3f}")
+            f"Объём: {_rtxt(self.chk_vol_vary, self.spin_vol_min, self.spin_vol_max, self.spin_vol_fixed, '.0f')} м³\n"
+            f"τy: {_rtxt(self.chk_tau_vary, self.spin_tau_min, self.spin_tau_max, self.spin_tau_fixed, '.0f')} Па\n"
+            f"η: {_rtxt(self.chk_eta_vary, self.spin_eta_min, self.spin_eta_max, self.spin_eta_fixed, '.1f')} Па·с\n"
+            f"n: {_rtxt(self.chk_n_vary, self.spin_n_min, self.spin_n_max, self.spin_n_fixed, '.3f')}\n"
+            f"K: {_rtxt(self.chk_K_vary, self.spin_K_min, self.spin_K_max, self.spin_K_fixed, '.1f')}")
 
         self._t_sweep_start = time.time()   # таймер LHS
 
