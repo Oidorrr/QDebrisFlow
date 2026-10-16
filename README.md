@@ -66,20 +66,23 @@ The dialog is organised into five tabs:
 
 1. **Layers and sources** — select a DEM raster and a line source layer; assign an
    independent hydrograph `Q(t)` to each line feature (constant discharge, a
-   time/Q table, or a CSV file).
+   time/Q table, or a CSV file); load all parameters from a JSON file.
 2. **O'Brien Parameters** — sediment concentration `Cv`, component densities
    (`ρs`, `ρw`), yield stress `τy` and mixture viscosity `η` (direct input *or*
    exponential coefficients), Manning `n`, and the viscous shape factor `K`.
 3. **Solver Settings** — simulation duration, maximum time step `dt_max`, the CFL
-   number (0.10–0.70), θ-weighting and the face-depth limiter; a **Stop** button
-   interrupts a running simulation.
+   number (0.10–0.70), θ-weighting and the face-depth limiter.
 4. **Output** — file prefix, output folder, output-layer selection, depth-threshold
    filtering of the written rasters, the depth that defines the arrival time, and
-   save/load of all parameters as JSON. Every run also writes `<prefix>_run.json`
-   (all parameters, library versions, volume balance, warnings).
+   saving all parameters as JSON. Every run also writes `<prefix>_run.json` (all
+   parameters, library versions, volume balance and the counters `edge_h_max_m` and
+   `vcap_cells`; the warning texts themselves are only in the log).
 5. **LHS analysis** — calibrate/validate against an observed inundation polygon and
    field depth-measurement points using Latin Hypercube Sampling, quality metrics,
    and a quintile sensitivity analysis; supports parallel worker threads.
+
+The **Stop** button next to *Run simulation* at the bottom of the window interrupts
+a running simulation.
 
 ---
 
