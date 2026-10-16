@@ -2312,6 +2312,17 @@ class DebrisFlowDialog(QDialog):
         if not out_dir:
             QMessageBox.warning(
                 self, "Error", "Specify an output folder."); return
+        csv_name = self.edit_sweep_csv.text().strip() or "sweep_results.csv"
+        if os.path.exists(os.path.join(out_dir, csv_name)):
+            # the CSV, <csv>_context.json and best_h_max_<csv>.tif of the previous analysis
+            # would be overwritten without a trace
+            if QMessageBox.question(
+                    self, "File exists",
+                    f"{os.path.join(out_dir, csv_name)} already exists.\n"
+                    "Overwrite the results of the previous LHS analysis\n"
+                    "(CSV, _context.json and the best h_max raster)?",
+                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+                return
 
         # Assemble sources from the Tab 1 table
         sources = []
@@ -2396,8 +2407,7 @@ class DebrisFlowDialog(QDialog):
             t_end           = float(self.spin_tend.value()),
             dt_max          = self.spin_dtmax.value(),
             out_dir         = out_dir,
-            csv_name        = (self.edit_sweep_csv.text().strip()
-                               or "sweep_results.csv"),
+            csv_name        = csv_name,
             cfl_number      = self.spin_cfl.value(),
             face_depth_limiter = self.chk_face_lim.isChecked(),
             theta           = self.spin_theta.value(),
