@@ -2021,8 +2021,8 @@ class DebrisFlowDialog(QDialog):
         note_rng = QLabel(
             "Checked — the parameter varies within a range (LHS sampling).  "
             "Unchecked — the parameter is fixed, one value for all runs.\n"
-            "When τy, η, n are unchecked, the value is taken automatically "
-            "from the \"O'Brien Parameters\" tab.")
+            "When a parameter is unchecked, the value is taken from its \"Value:\" "
+            "field on this tab; the \"O'Brien Parameters\" tab is not used for it.")
         note_rng.setWordWrap(True)
         note_rng.setStyleSheet("color:#777;font-size:10px;margin-top:2px")
         rng_lo.addWidget(note_rng)
