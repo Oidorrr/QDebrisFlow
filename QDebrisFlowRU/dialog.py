@@ -2932,7 +2932,18 @@ class DebrisFlowDialog(QDialog):
         # гидрографы хранятся по fid, а он уникален только внутри слоя:
         # другой слой не должен их унаследовать
         if layer.id() != self._hydro_layer_id:
-            self._hydro_data = {}
+            # гидрографы из JSON, чей линейный слой не найден по имени: предложить сохранить
+            # их для выбранного слоя, а не молча заменить на 100 м³/с
+            keep = (self._hydro_layer_id is None and bool(self._hydro_data)
+                    and all(layer.getFeature(fid).isValid() for fid in self._hydro_data)
+                    and QMessageBox.question(
+                        self, "Гидрографы из файла",
+                        f"Гидрографы, загруженные из файла параметров ({len(self._hydro_data)}), "
+                        f"не привязаны к слою.\nПрименить их к объектам слоя «{layer.name()}» "
+                        "с теми же ID?",
+                        QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes) == QMessageBox.Yes)
+            if not keep:
+                self._hydro_data = {}
             self._hydro_layer_id = layer.id()
         feats = list(layer.getFeatures())
         if not feats:
