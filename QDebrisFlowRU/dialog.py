@@ -274,6 +274,21 @@ def _read_job_dem(p: dict):
     return read_dem_array(None, source=p["dem_layer"]["source"], crs=p["dem_crs"])
 
 
+def _ogr_mem_datasource():
+    """Векторный источник OGR в памяти: драйвер "MEM" (векторный с GDAL 3.11), иначе
+    старый "Memory" (устарел с GDAL 3.11)."""
+    from osgeo import ogr
+    for name in ("MEM", "Memory"):
+        drv = ogr.GetDriverByName(name)
+        try:
+            ds = drv.CreateDataSource("tmp") if drv is not None else None
+        except Exception:
+            ds = None
+        if ds is not None:
+            return ds
+    raise RuntimeError("no in-memory OGR vector driver (MEM / Memory)")
+
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Вспомогательный диалог: редактор гидрографа одной линии
@@ -749,8 +764,7 @@ class SimulationWorker(QThread):
             crs    = geo_info.get("crs")
 
             # In-memory vector dataset с одним объектом
-            mem_vec_drv = ogr.GetDriverByName("Memory")
-            vec_ds      = mem_vec_drv.CreateDataSource("tmp")
+            vec_ds      = _ogr_mem_datasource()
 
             srs = None
             if crs:
@@ -782,7 +796,9 @@ class SimulationWorker(QThread):
             ras_ds = vec_ds = None
             return np.where(mask)
 
-        except Exception:
+        except Exception as e:
+            self.log_message.emit(
+                f"    ⚠ Растеризация линии через GDAL не удалась ({e}) — запасной путь QGIS (медленнее, след шире).")
             # Fallback: QGIS distance-based
             dx, dy   = geo_info["dx"], geo_info["dy"]
             xmin     = geo_info["xmin"]
@@ -1135,7 +1151,7 @@ class SweepWorker(QThread):
             nx, ny = geo_info["nx"], geo_info["ny"]
             gt     = geo_info["geotransform"]
             crs    = geo_info.get("crs")
-            mem_vec = ogr.GetDriverByName("Memory").CreateDataSource("tmp")
+            mem_vec = _ogr_mem_datasource()
             srs = None
             if crs:
                 srs = osr.SpatialReference()
@@ -1159,7 +1175,9 @@ class SweepWorker(QThread):
             mask = ras_ds.GetRasterBand(1).ReadAsArray().astype(bool)
             ras_ds = mem_vec = None
             return np.where(mask)
-        except Exception:
+        except Exception as e:
+            self.sweep_log.emit(
+                f"  ⚠ Растеризация линии через GDAL не удалась ({e}) — запасной путь QGIS (медленнее, след шире).")
             dx, dy = geo_info["dx"], geo_info["dy"]
             xmin, ymax = geo_info["xmin"], geo_info["ymax"]
             nx, ny = geo_info["nx"], geo_info["ny"]
@@ -1186,7 +1204,7 @@ class SweepWorker(QThread):
             gt     = geo_info["geotransform"]
             crs    = geo_info.get("crs")
 
-            mem_vec = ogr.GetDriverByName("Memory").CreateDataSource("tmp")
+            mem_vec = _ogr_mem_datasource()
             srs = None
             if crs:
                 srs = osr.SpatialReference()
