@@ -174,8 +174,10 @@ Parameter sets can be saved to / loaded from JSON on the *Output* and
 The **LHS analysis** tab compares simulated against observed data:
 
 - Inputs: an observed **inundation polygon**, **field depth points** and an optional
-  **evaluation area** (cells outside it are ignored in TP/FP/FN). Vector layers in
-  another CRS are reprojected to the DEM CRS.
+  **evaluation area** (cells outside it are ignored in TP/FP/FN). The evaluation
+  area is the polygon of the mapped territory, not the inundation polygon: choosing
+  the inundation polygon itself there makes FP ≡ 0. Vector layers in another CRS
+  are reprojected to the DEM CRS.
 - Quality metrics: `TP`, `FP`, `FN`, `ΩTm` (≡ 1 − CSI), depth over-/under-estimation
   (`Δo`, `Δu`), and the combined metric `Cm` (0 = best).
 - Sampling: volume, `η` and `K` are sampled log-uniformly, `τy` and `n` uniformly.
