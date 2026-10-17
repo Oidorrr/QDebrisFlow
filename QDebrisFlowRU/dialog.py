@@ -1701,7 +1701,7 @@ class DebrisFlowDialog(QDialog):
         layout.addRow(self.chk_face_lim)
 
         self.spin_theta = QDoubleSpinBox()
-        self.spin_theta.setRange(0.50, 1.00); self.spin_theta.setValue(1.00)
+        self.spin_theta.setRange(0.50, 1.00); self.spin_theta.setValue(0.80)
         self.spin_theta.setDecimals(2); self.spin_theta.setSingleStep(0.05)
         self.spin_theta.setToolTip(
             "θ-взвешивание расхода (de Almeida et al. 2012):\n"
@@ -1711,6 +1711,10 @@ class DebrisFlowDialog(QDialog):
             "1.00 — исходная схема Bates et al. (2010), как в опубликованных расчётах.\n"
             "0.80 — значение по умолчанию в Landlab; обычно 0.7–0.9.")
         layout.addRow("θ-взвешивание:", self.spin_theta)
+        # скрыты от пользователя: фиксированные значения, ограничитель включён и θ = 0.8
+        for wdg in (self.chk_face_lim, self.spin_theta,
+                    layout.labelForField(self.spin_theta)):
+            wdg.setVisible(False)
 
         lbl = QLabel(
             "<i>h_min = 5 мм зафиксирован автоматически для устойчивости LIA.</i>")

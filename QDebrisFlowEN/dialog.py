@@ -1700,7 +1700,7 @@ class DebrisFlowDialog(QDialog):
         layout.addRow(self.chk_face_lim)
 
         self.spin_theta = QDoubleSpinBox()
-        self.spin_theta.setRange(0.50, 1.00); self.spin_theta.setValue(1.00)
+        self.spin_theta.setRange(0.50, 1.00); self.spin_theta.setValue(0.80)
         self.spin_theta.setDecimals(2); self.spin_theta.setSingleStep(0.05)
         self.spin_theta.setToolTip(
             "θ-weighting of the discharge (de Almeida et al. 2012):\n"
@@ -1710,6 +1710,10 @@ class DebrisFlowDialog(QDialog):
             "1.00 — original Bates et al. (2010) scheme, as in the published runs.\n"
             "0.80 — Landlab default; 0.7–0.9 is the usual range.")
         layout.addRow("θ-weighting:", self.spin_theta)
+        # hidden from the user: fixed defaults, limiter ON and θ = 0.8
+        for wdg in (self.chk_face_lim, self.spin_theta,
+                    layout.labelForField(self.spin_theta)):
+            wdg.setVisible(False)
 
         lbl = QLabel(
             "<i>h_min = 5 mm is fixed automatically for LIA stability.</i>")
