@@ -2962,9 +2962,8 @@ class DebrisFlowDialog(QDialog):
             if "t_end"  in sv: self.spin_tend.setValue(int(sv["t_end"]))
             if "dt_max" in sv: self.spin_dtmax.setValue(sv["dt_max"])
             if "cfl_number" in sv: self.spin_cfl.setValue(float(sv["cfl_number"]))
-            if "face_depth_limiter" in sv:
-                self.chk_face_lim.setChecked(bool(sv["face_depth_limiter"]))
-            if "theta" in sv: self.spin_theta.setValue(float(sv["theta"]))
+            # face_depth_limiter and theta from the file are ignored: the plugin runs with
+            # fixed values (limiter ON, θ = 0.8), whatever an older file says
 
         # --- Output ---
         out = data.get("output", {})
@@ -2987,7 +2986,7 @@ class DebrisFlowDialog(QDialog):
         # keys that change the result but are missing in older files: the current
         # widget values stay in effect, so the user must see which ones they are
         _missing = ([f"obrien.{k}" for k in ("K_visc", "rho_s", "rho_w", "direct_mode") if k not in ob]
-                    + [f"solver.{k}" for k in ("cfl_number", "face_depth_limiter", "theta") if k not in sv])
+                    + [f"solver.{k}" for k in ("cfl_number",) if k not in sv])
         if _missing:
             warnings.append("Not in the file (older version), the current values are kept: "
                             + ", ".join(_missing))
