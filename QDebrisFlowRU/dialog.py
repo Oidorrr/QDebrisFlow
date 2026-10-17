@@ -1342,7 +1342,8 @@ class DebrisFlowDialog(QDialog):
                 "2. Параметры O'Brien")
         self.tabs_single.addTab(self._with_apply(self._tab_solver(self), 3, self, self.lhs),
                 "3. Настройки решателя")
-        self.tabs_single.addTab(self._with_apply(self._tab_output(self), 4, self, self.lhs),
+        out_single = self._with_apply(self._tab_output(self), 4, self, self.lhs)
+        self.tabs_single.addTab(out_single,
                 "4. Выходные данные")
         self.tabs_lhs = QTabWidget()
         self.tabs_lhs.addTab(self._with_apply(self._tab_sources(self.lhs), 1, self.lhs, self),
@@ -1351,7 +1352,8 @@ class DebrisFlowDialog(QDialog):
                 "2. Параметры O'Brien (LHS-анализ)")
         self.tabs_lhs.addTab(self._with_apply(self._tab_solver(self.lhs), 3, self.lhs, self),
                 "3. Настройки решателя")
-        self.tabs_lhs.addTab(self._with_apply(self._tab_lhs_output(), 4, self.lhs, self),
+        out_lhs = self._with_apply(self._tab_lhs_output(), 4, self.lhs, self)
+        self.tabs_lhs.addTab(out_lhs,
                 "4. Выходные данные")
         self.tabs = QTabWidget()
         self.tabs.addTab(self.tabs_single, "Одиночный прогон")
@@ -1368,20 +1370,30 @@ class DebrisFlowDialog(QDialog):
         self.log_box.setMaximumHeight(150)
         main.addWidget(self.log_box)
 
+        # кнопки запуска — на подвкладке 4 каждой вкладки: запуск после настройки всех подвкладок
         btns = QHBoxLayout()
         self.btn_run = QPushButton("▶  Запуск симуляции")
         self.btn_run.setStyleSheet("font-weight:bold; padding:6px;")
         self.btn_run.clicked.connect(self._on_run)
-        btn_close = QPushButton("Закрыть")
-        btn_close.clicked.connect(self.close)
         btns.addWidget(self.btn_run)
         self.btn_stop = QPushButton("⏹  Стоп")
         self.btn_stop.setToolTip("Остановить идущий расчёт на ближайшем шаге по времени.")
         self.btn_stop.setEnabled(False)
         self.btn_stop.clicked.connect(self._on_stop)
         btns.addWidget(self.btn_stop)
-        btns.addWidget(btn_close)
-        main.addLayout(btns)
+        out_single.layout().addLayout(btns)
+
+        # кнопки запуска LHS (подвкладка 4 анализа прогонов)
+        btn_row = QHBoxLayout()
+        self.btn_sweep_run = QPushButton("▶  Запустить LHS-анализ")
+        self.btn_sweep_run.setStyleSheet("font-weight:bold; padding:6px;")
+        self.btn_sweep_run.clicked.connect(self._on_sweep_run)
+        self.btn_sweep_cancel = QPushButton("⏹  Остановить")
+        self.btn_sweep_cancel.setEnabled(False)
+        self.btn_sweep_cancel.clicked.connect(self._on_sweep_cancel)
+        btn_row.addWidget(self.btn_sweep_run)
+        btn_row.addWidget(self.btn_sweep_cancel)
+        out_lhs.layout().addLayout(btn_row)
 
     # виджеты, которые копирует «Применить настройки из другой подвкладки», по подвкладкам;
     # для подвкладки 1 копируется ещё таблица источников с гидрографами
@@ -2213,18 +2225,6 @@ class DebrisFlowDialog(QDialog):
         self.sweep_log_box.setFont(QFont("Courier", 9))
         self.sweep_log_box.setMaximumHeight(130)
         lo.addWidget(self.sweep_log_box)
-
-        # ── Кнопки ────────────────────────────────────────────────────────────
-        btn_row = QHBoxLayout()
-        self.btn_sweep_run = QPushButton("▶  Запустить LHS-анализ")
-        self.btn_sweep_run.setStyleSheet("font-weight:bold; padding:6px;")
-        self.btn_sweep_run.clicked.connect(self._on_sweep_run)
-        self.btn_sweep_cancel = QPushButton("⏹  Остановить")
-        self.btn_sweep_cancel.setEnabled(False)
-        self.btn_sweep_cancel.clicked.connect(self._on_sweep_cancel)
-        btn_row.addWidget(self.btn_sweep_run)
-        btn_row.addWidget(self.btn_sweep_cancel)
-        lo.addLayout(btn_row)
 
         # Оборачиваем в QScrollArea для работы на ноутбуках
         scroll = QScrollArea()
