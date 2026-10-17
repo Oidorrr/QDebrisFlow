@@ -1341,7 +1341,8 @@ class DebrisFlowDialog(QDialog):
                 "2. O'Brien Parameters")
         self.tabs_single.addTab(self._with_apply(self._tab_solver(self), 3, self, self.lhs),
                 "3. Solver Settings")
-        self.tabs_single.addTab(self._with_apply(self._tab_output(self), 4, self, self.lhs),
+        out_single = self._with_apply(self._tab_output(self), 4, self, self.lhs)
+        self.tabs_single.addTab(out_single,
                 "4. Output")
         self.tabs_lhs = QTabWidget()
         self.tabs_lhs.addTab(self._with_apply(self._tab_sources(self.lhs), 1, self.lhs, self),
@@ -1350,7 +1351,8 @@ class DebrisFlowDialog(QDialog):
                 "2. O'Brien Parameters (LHS analysis)")
         self.tabs_lhs.addTab(self._with_apply(self._tab_solver(self.lhs), 3, self.lhs, self),
                 "3. Solver Settings")
-        self.tabs_lhs.addTab(self._with_apply(self._tab_lhs_output(), 4, self.lhs, self),
+        out_lhs = self._with_apply(self._tab_lhs_output(), 4, self.lhs, self)
+        self.tabs_lhs.addTab(out_lhs,
                 "4. Output")
         self.tabs = QTabWidget()
         self.tabs.addTab(self.tabs_single, "Single run")
@@ -1367,20 +1369,30 @@ class DebrisFlowDialog(QDialog):
         self.log_box.setMaximumHeight(150)
         main.addWidget(self.log_box)
 
+        # run buttons are on sub-tab 4 of each tab: a run starts after all sub-tabs are set
         btns = QHBoxLayout()
         self.btn_run = QPushButton("▶  Run simulation")
         self.btn_run.setStyleSheet("font-weight:bold; padding:6px;")
         self.btn_run.clicked.connect(self._on_run)
-        btn_close = QPushButton("Close")
-        btn_close.clicked.connect(self.close)
         btns.addWidget(self.btn_run)
         self.btn_stop = QPushButton("⏹  Stop")
         self.btn_stop.setToolTip("Stop the running simulation at the next time step.")
         self.btn_stop.setEnabled(False)
         self.btn_stop.clicked.connect(self._on_stop)
         btns.addWidget(self.btn_stop)
-        btns.addWidget(btn_close)
-        main.addLayout(btns)
+        out_single.layout().addLayout(btns)
+
+        # LHS run buttons (sub-tab 4 of the multiple-run analysis)
+        btn_row = QHBoxLayout()
+        self.btn_sweep_run = QPushButton("▶  Run LHS analysis")
+        self.btn_sweep_run.setStyleSheet("font-weight:bold; padding:6px;")
+        self.btn_sweep_run.clicked.connect(self._on_sweep_run)
+        self.btn_sweep_cancel = QPushButton("⏹  Stop")
+        self.btn_sweep_cancel.setEnabled(False)
+        self.btn_sweep_cancel.clicked.connect(self._on_sweep_cancel)
+        btn_row.addWidget(self.btn_sweep_run)
+        btn_row.addWidget(self.btn_sweep_cancel)
+        out_lhs.layout().addLayout(btn_row)
 
     # widgets copied by "Apply settings from another sub-tab" for each sub-tab;
     # sub-tab 1 also copies the source table with its hydrographs
@@ -2212,18 +2224,6 @@ class DebrisFlowDialog(QDialog):
         self.sweep_log_box.setFont(QFont("Courier", 9))
         self.sweep_log_box.setMaximumHeight(130)
         lo.addWidget(self.sweep_log_box)
-
-        # ── Buttons ──────────────────────────────────────────────────────────────
-        btn_row = QHBoxLayout()
-        self.btn_sweep_run = QPushButton("▶  Run LHS analysis")
-        self.btn_sweep_run.setStyleSheet("font-weight:bold; padding:6px;")
-        self.btn_sweep_run.clicked.connect(self._on_sweep_run)
-        self.btn_sweep_cancel = QPushButton("⏹  Stop")
-        self.btn_sweep_cancel.setEnabled(False)
-        self.btn_sweep_cancel.clicked.connect(self._on_sweep_cancel)
-        btn_row.addWidget(self.btn_sweep_run)
-        btn_row.addWidget(self.btn_sweep_cancel)
-        lo.addLayout(btn_row)
 
         # Wrap in a QScrollArea to work on laptops
         scroll = QScrollArea()
