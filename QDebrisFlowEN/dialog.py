@@ -1382,7 +1382,12 @@ class DebrisFlowDialog(QDialog):
         btns.addWidget(self.btn_stop)
         out_single.layout().addLayout(btns)
 
-        # LHS run buttons (sub-tab 4 of the multiple-run analysis)
+        # LHS log and run buttons (sub-tab 4 of the multiple-run analysis)
+        self.sweep_log_box = QTextEdit()
+        self.sweep_log_box.setReadOnly(True)
+        self.sweep_log_box.setFont(QFont("Courier", 9))
+        self.sweep_log_box.setMaximumHeight(130)
+        out_lhs.layout().addWidget(self.sweep_log_box)
         btn_row = QHBoxLayout()
         self.btn_sweep_run = QPushButton("▶  Run LHS analysis")
         self.btn_sweep_run.setStyleSheet("font-weight:bold; padding:6px;")
@@ -2216,14 +2221,6 @@ class DebrisFlowDialog(QDialog):
         note_rng.setStyleSheet("color:#777;font-size:10px;margin-top:2px")
         rng_lo.addWidget(note_rng)
         lo.addWidget(grp_rng)
-
-
-        # ── Sweep log ───────────────────────────────────────────────────────────
-        self.sweep_log_box = QTextEdit()
-        self.sweep_log_box.setReadOnly(True)
-        self.sweep_log_box.setFont(QFont("Courier", 9))
-        self.sweep_log_box.setMaximumHeight(130)
-        lo.addWidget(self.sweep_log_box)
 
         # Wrap in a QScrollArea to work on laptops
         scroll = QScrollArea()
