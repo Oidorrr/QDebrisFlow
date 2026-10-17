@@ -2963,9 +2963,8 @@ class DebrisFlowDialog(QDialog):
             if "t_end"  in sv: self.spin_tend.setValue(int(sv["t_end"]))
             if "dt_max" in sv: self.spin_dtmax.setValue(sv["dt_max"])
             if "cfl_number" in sv: self.spin_cfl.setValue(float(sv["cfl_number"]))
-            if "face_depth_limiter" in sv:
-                self.chk_face_lim.setChecked(bool(sv["face_depth_limiter"]))
-            if "theta" in sv: self.spin_theta.setValue(float(sv["theta"]))
+            # face_depth_limiter и theta из файла не применяются: плагин считает с
+            # фиксированными значениями (ограничитель включён, θ = 0.8)
 
         # --- Output ---
         out = data.get("output", {})
@@ -2988,7 +2987,7 @@ class DebrisFlowDialog(QDialog):
         # ключи, влияющие на результат, которых нет в старых файлах: действуют текущие
         # значения виджетов, и пользователь должен видеть, какие именно
         _missing = ([f"obrien.{k}" for k in ("K_visc", "rho_s", "rho_w", "direct_mode") if k not in ob]
-                    + [f"solver.{k}" for k in ("cfl_number", "face_depth_limiter", "theta") if k not in sv])
+                    + [f"solver.{k}" for k in ("cfl_number",) if k not in sv])
         if _missing:
             warnings.append("Нет в файле (старая версия), оставлены текущие значения: "
                             + ", ".join(_missing))
