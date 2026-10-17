@@ -12,6 +12,7 @@ New in v1.0:
       Pop-up hydrograph editor for a single feature.
 """
 
+import copy
 import json
 import os
 import re
@@ -1334,15 +1335,23 @@ class DebrisFlowDialog(QDialog):
         # two top-level tabs with the same four sub-tabs; each tab has its own widgets:
         # single run on the dialog itself, multiple-run analysis on self.lhs
         self.tabs_single = QTabWidget()
-        self.tabs_single.addTab(self._tab_sources(self),  "1. Layers and sources")
-        self.tabs_single.addTab(self._tab_rheology(),     "2. O'Brien Parameters")
-        self.tabs_single.addTab(self._tab_solver(self),   "3. Solver Settings")
-        self.tabs_single.addTab(self._tab_output(self),   "4. Output")
+        self.tabs_single.addTab(self._with_apply(self._tab_sources(self), 1, self, self.lhs),
+                "1. Layers and sources")
+        self.tabs_single.addTab(self._with_apply(self._tab_rheology(), 2, self, self.lhs),
+                "2. O'Brien Parameters")
+        self.tabs_single.addTab(self._with_apply(self._tab_solver(self), 3, self, self.lhs),
+                "3. Solver Settings")
+        self.tabs_single.addTab(self._with_apply(self._tab_output(self), 4, self, self.lhs),
+                "4. Output")
         self.tabs_lhs = QTabWidget()
-        self.tabs_lhs.addTab(self._tab_sources(self.lhs), "1. Layers and sources")
-        self.tabs_lhs.addTab(self._tab_sweep(),           "2. O'Brien Parameters (LHS analysis)")
-        self.tabs_lhs.addTab(self._tab_solver(self.lhs),  "3. Solver Settings")
-        self.tabs_lhs.addTab(self._tab_lhs_output(),      "4. Output")
+        self.tabs_lhs.addTab(self._with_apply(self._tab_sources(self.lhs), 1, self.lhs, self),
+                "1. Layers and sources")
+        self.tabs_lhs.addTab(self._with_apply(self._tab_sweep(), 2, self.lhs, self),
+                "2. O'Brien Parameters (LHS analysis)")
+        self.tabs_lhs.addTab(self._with_apply(self._tab_solver(self.lhs), 3, self.lhs, self),
+                "3. Solver Settings")
+        self.tabs_lhs.addTab(self._with_apply(self._tab_lhs_output(), 4, self.lhs, self),
+                "4. Output")
         self.tabs = QTabWidget()
         self.tabs.addTab(self.tabs_single, "Single run")
         self.tabs.addTab(self.tabs_lhs,    "Multiple-run analysis (LHS analysis)")
@@ -1372,6 +1381,57 @@ class DebrisFlowDialog(QDialog):
         btns.addWidget(self.btn_stop)
         btns.addWidget(btn_close)
         main.addLayout(btns)
+
+    # widgets copied by "Apply settings from another sub-tab" for each sub-tab;
+    # sub-tab 1 also copies the source table with its hydrographs
+    _SUBTAB_WIDGETS = {
+        1: ("dem_combo", "src_line_combo", "edit_load_path"),
+        2: ("spin_Cv", "spin_Cv_max", "spin_rho_s", "spin_rho_w"),
+        3: ("spin_tend", "spin_dtmax", "spin_cfl", "chk_face_lim", "spin_theta"),
+        4: ("edit_prefix", "edit_outdir", "chk_h_max", "chk_V_max", "chk_HV2_max",
+            "chk_Fr_hv2", "chk_h_final", "chk_t_arrival", "spin_arrival_thr",
+            "chk_threshold", "spin_threshold", "edit_save_path"),
+    }
+
+    def _with_apply(self, page, idx, dst, src) -> QWidget:
+        """Sub-tab page with the button that copies the same sub-tab of panel src into dst."""
+        w = QWidget()
+        lo = QVBoxLayout(w)
+        lo.setContentsMargins(0, 0, 0, 0)
+        btn = QPushButton("Apply settings from another sub-tab to this one")
+        btn.clicked.connect(lambda _=False: self._apply_subtab(idx, src, dst))
+        row = QHBoxLayout()
+        row.addWidget(btn)
+        row.addStretch()
+        lo.addLayout(row)
+        lo.addWidget(page)
+        return w
+
+    def _apply_subtab(self, idx, src, dst):
+        """Copy the settings of sub-tab idx from panel src to panel dst."""
+        for name in self._SUBTAB_WIDGETS[idx]:
+            a, b = getattr(src, name), getattr(dst, name)
+            if isinstance(a, QgsMapLayerComboBox):
+                b.setLayer(a.currentLayer())
+            elif isinstance(a, QCheckBox):
+                b.setChecked(a.isChecked())
+            elif isinstance(a, QLineEdit):
+                b.setText(a.text())
+            else:
+                b.setValue(a.value())
+        if idx == 1:
+            dst._hydro_data     = copy.deepcopy(src._hydro_data)
+            dst._hydro_layer_id = src._hydro_layer_id
+            dst.tbl_sources.setRowCount(0)
+            for row in range(src.tbl_sources.rowCount()):
+                it_id, it_name, it_q = (src.tbl_sources.item(row, c) for c in range(3))
+                if it_id is None:
+                    continue
+                self._add_source_row(dst, int(it_id.text()),
+                                     it_name.text() if it_name else "",
+                                     it_q.text() if it_q else "—")
+            self._refresh_volumes(dst)
+            dst.tbl_sources.resizeRowsToContents()
 
     # ── Tab 1: Layers and sources ─────────────────────────────────────────────
 

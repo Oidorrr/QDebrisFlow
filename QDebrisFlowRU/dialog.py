@@ -12,6 +12,7 @@ Debris Flow O'Brien — диалог симуляции v1.0
       Всплывающий редактор гидрографа для одного объекта.
 """
 
+import copy
 import json
 import os
 import re
@@ -1335,15 +1336,23 @@ class DebrisFlowDialog(QDialog):
         # две вкладки верхнего уровня с одинаковыми четырьмя подвкладками; у каждой свои
         # виджеты: одиночный прогон — в самом диалоге, анализ прогонов — в self.lhs
         self.tabs_single = QTabWidget()
-        self.tabs_single.addTab(self._tab_sources(self),  "1. Слои и источники")
-        self.tabs_single.addTab(self._tab_rheology(),     "2. Параметры O'Brien")
-        self.tabs_single.addTab(self._tab_solver(self),   "3. Настройки решателя")
-        self.tabs_single.addTab(self._tab_output(self),   "4. Выходные данные")
+        self.tabs_single.addTab(self._with_apply(self._tab_sources(self), 1, self, self.lhs),
+                "1. Слои и источники")
+        self.tabs_single.addTab(self._with_apply(self._tab_rheology(), 2, self, self.lhs),
+                "2. Параметры O'Brien")
+        self.tabs_single.addTab(self._with_apply(self._tab_solver(self), 3, self, self.lhs),
+                "3. Настройки решателя")
+        self.tabs_single.addTab(self._with_apply(self._tab_output(self), 4, self, self.lhs),
+                "4. Выходные данные")
         self.tabs_lhs = QTabWidget()
-        self.tabs_lhs.addTab(self._tab_sources(self.lhs), "1. Слои и источники")
-        self.tabs_lhs.addTab(self._tab_sweep(),           "2. Параметры O'Brien (LHS-анализ)")
-        self.tabs_lhs.addTab(self._tab_solver(self.lhs),  "3. Настройки решателя")
-        self.tabs_lhs.addTab(self._tab_lhs_output(),      "4. Выходные данные")
+        self.tabs_lhs.addTab(self._with_apply(self._tab_sources(self.lhs), 1, self.lhs, self),
+                "1. Слои и источники")
+        self.tabs_lhs.addTab(self._with_apply(self._tab_sweep(), 2, self.lhs, self),
+                "2. Параметры O'Brien (LHS-анализ)")
+        self.tabs_lhs.addTab(self._with_apply(self._tab_solver(self.lhs), 3, self.lhs, self),
+                "3. Настройки решателя")
+        self.tabs_lhs.addTab(self._with_apply(self._tab_lhs_output(), 4, self.lhs, self),
+                "4. Выходные данные")
         self.tabs = QTabWidget()
         self.tabs.addTab(self.tabs_single, "Одиночный прогон")
         self.tabs.addTab(self.tabs_lhs,    "Анализ множественных прогонов (LHS-анализ)")
@@ -1373,6 +1382,57 @@ class DebrisFlowDialog(QDialog):
         btns.addWidget(self.btn_stop)
         btns.addWidget(btn_close)
         main.addLayout(btns)
+
+    # виджеты, которые копирует «Применить настройки из другой подвкладки», по подвкладкам;
+    # для подвкладки 1 копируется ещё таблица источников с гидрографами
+    _SUBTAB_WIDGETS = {
+        1: ("dem_combo", "src_line_combo", "edit_load_path"),
+        2: ("spin_Cv", "spin_Cv_max", "spin_rho_s", "spin_rho_w"),
+        3: ("spin_tend", "spin_dtmax", "spin_cfl", "chk_face_lim", "spin_theta"),
+        4: ("edit_prefix", "edit_outdir", "chk_h_max", "chk_V_max", "chk_HV2_max",
+            "chk_Fr_hv2", "chk_h_final", "chk_t_arrival", "spin_arrival_thr",
+            "chk_threshold", "spin_threshold", "edit_save_path"),
+    }
+
+    def _with_apply(self, page, idx, dst, src) -> QWidget:
+        """Страница подвкладки с кнопкой, копирующей ту же подвкладку панели src в dst."""
+        w = QWidget()
+        lo = QVBoxLayout(w)
+        lo.setContentsMargins(0, 0, 0, 0)
+        btn = QPushButton("Применить настройки из другой подвкладки к этой")
+        btn.clicked.connect(lambda _=False: self._apply_subtab(idx, src, dst))
+        row = QHBoxLayout()
+        row.addWidget(btn)
+        row.addStretch()
+        lo.addLayout(row)
+        lo.addWidget(page)
+        return w
+
+    def _apply_subtab(self, idx, src, dst):
+        """Скопировать настройки подвкладки idx из панели src в панель dst."""
+        for name in self._SUBTAB_WIDGETS[idx]:
+            a, b = getattr(src, name), getattr(dst, name)
+            if isinstance(a, QgsMapLayerComboBox):
+                b.setLayer(a.currentLayer())
+            elif isinstance(a, QCheckBox):
+                b.setChecked(a.isChecked())
+            elif isinstance(a, QLineEdit):
+                b.setText(a.text())
+            else:
+                b.setValue(a.value())
+        if idx == 1:
+            dst._hydro_data     = copy.deepcopy(src._hydro_data)
+            dst._hydro_layer_id = src._hydro_layer_id
+            dst.tbl_sources.setRowCount(0)
+            for row in range(src.tbl_sources.rowCount()):
+                it_id, it_name, it_q = (src.tbl_sources.item(row, c) for c in range(3))
+                if it_id is None:
+                    continue
+                self._add_source_row(dst, int(it_id.text()),
+                                     it_name.text() if it_name else "",
+                                     it_q.text() if it_q else "—")
+            self._refresh_volumes(dst)
+            dst.tbl_sources.resizeRowsToContents()
 
     # ── Вкладка 1: Слои и источники ───────────────────────────────────────────
 
