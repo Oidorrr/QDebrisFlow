@@ -24,7 +24,7 @@ class DebrisFlowPlugin:
             "Селевые потоки методом O'Brien",
             self.iface.mainWindow(),
         )
-        self.action.setToolTip("Селевые потоки методом O'Brien")
+        self.action.setToolTip("QDebrisFlow 1.1")
         self.action.triggered.connect(self.run)
         self.iface.addToolBarIcon(self.action)
         self.iface.addPluginToMenu("Селевые потоки", self.action)

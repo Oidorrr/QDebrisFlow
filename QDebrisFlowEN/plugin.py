@@ -24,7 +24,7 @@ class DebrisFlowPlugin:
             "Debris Flows — O'Brien method",
             self.iface.mainWindow(),
         )
-        self.action.setToolTip("Debris Flows — O'Brien method")
+        self.action.setToolTip("QDebrisFlow 1.1")
         self.action.triggered.connect(self.run)
         self.iface.addToolBarIcon(self.action)
         self.iface.addPluginToMenu("Debris Flows", self.action)
