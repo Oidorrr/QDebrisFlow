@@ -2129,14 +2129,16 @@ class DebrisFlowDialog(QDialog):
             # Range widget
             rw = QWidget()
             rh = QHBoxLayout(rw); rh.setContentsMargins(0, 0, 0, 0)
+            # decimals first: setRange/setValue round to the current decimals; decs must
+            # resolve the minimum (η: 3 decimals, otherwise min 0.001 shows as 0.00 → log10(0))
             s_min = QDoubleSpinBox()
-            s_min.setRange(*rng); s_min.setValue(lo_def)
             s_min.setDecimals(decs); s_min.setSuffix(suffix)
+            s_min.setRange(*rng); s_min.setValue(lo_def)
             s_min.setSingleStep(step)
             setattr(self, mn_attr, s_min)
             s_max = QDoubleSpinBox()
-            s_max.setRange(*rng); s_max.setValue(hi_def)
             s_max.setDecimals(decs); s_max.setSuffix(suffix)
+            s_max.setRange(*rng); s_max.setValue(hi_def)
             s_max.setSingleStep(step)
             setattr(self, mx_attr, s_max)
             rh.addWidget(QLabel("from")); rh.addWidget(s_min)
@@ -2148,8 +2150,8 @@ class DebrisFlowDialog(QDialog):
             fh = QHBoxLayout(fw); fh.setContentsMargins(0, 0, 0, 0)
             fh.addWidget(QLabel("Value:"))
             s_fix = QDoubleSpinBox()
-            s_fix.setRange(*rng); s_fix.setValue(fix_def)
             s_fix.setDecimals(decs); s_fix.setSuffix(suffix)
+            s_fix.setRange(*rng); s_fix.setValue(fix_def)
             s_fix.setSingleStep(step)
             setattr(self, fix_attr, s_fix)
             fh.addWidget(s_fix)
@@ -2179,7 +2181,7 @@ class DebrisFlowDialog(QDialog):
                    "chk_eta_vary", "spin_eta_fixed",
                    "spin_eta_min",  "spin_eta_max",
                    fix_def=10.0, lo_def=2.0, hi_def=50.0,
-                   suffix=" Pa·s", decs=2, step=1.0,
+                   suffix=" Pa·s", decs=3, step=1.0,
                    rng=(0.001, 10000))
 
         _param_row("Vary Manning n",
