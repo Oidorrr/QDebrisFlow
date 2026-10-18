@@ -1675,8 +1675,8 @@ class DebrisFlowDialog(QDialog):
             "Постпожарный диапазон: 0.30–0.55")
         fl.addRow("Cv:", p.spin_Cv)
         p.spin_Cv_max = QDoubleSpinBox()
-        p.spin_Cv_max.setRange(0.60, 0.90); p.spin_Cv_max.setValue(0.615)
         p.spin_Cv_max.setDecimals(3)
+        p.spin_Cv_max.setRange(0.60, 0.90); p.spin_Cv_max.setValue(0.615)
         p.spin_Cv_max.setToolTip(
             "Верхняя граница допустимого Cv (только проверка ввода: Cv должно быть < Cv_max).\n"
             "Ни в одну формулу не входит и на результат не влияет.\n"
