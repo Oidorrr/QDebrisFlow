@@ -3556,11 +3556,13 @@ class DebrisFlowDialog(QDialog):
 
         lines = self._load_result_layers(paths, prefix, wanted)
 
-        folder = list(paths.values())[0] if paths else out_dir
+        # folder of the written layers; the output folder of the dialog if nothing was written
+        folder = (os.path.dirname(next(iter(paths.values()))) if paths
+                  else self.edit_outdir.text().strip())
         QMessageBox.information(
             self, "Simulation completed",
             "Layers added to QGIS:\n" + "\n".join(lines) +
-            f"\n\nFolder:\n{os.path.dirname(folder)}")
+            f"\n\nFolder:\n{folder}")
 
     def _load_result_layers(self, paths: dict, prefix: str, wanted) -> list:
         """Load the written layers into QGIS (layer name = file name); lines for the message."""

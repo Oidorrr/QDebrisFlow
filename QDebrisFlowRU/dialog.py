@@ -3557,11 +3557,13 @@ class DebrisFlowDialog(QDialog):
 
         lines = self._load_result_layers(paths, prefix, wanted)
 
-        folder = list(paths.values())[0] if paths else out_dir
+        # папка записанных слоёв; если ничего не записано — папка вывода из окна
+        folder = (os.path.dirname(next(iter(paths.values()))) if paths
+                  else self.edit_outdir.text().strip())
         QMessageBox.information(
             self, "Симуляция завершена",
             "Добавлены слои в QGIS:\n" + "\n".join(lines) +
-            f"\n\nПапка:\n{os.path.dirname(folder)}")
+            f"\n\nПапка:\n{folder}")
 
     def _load_result_layers(self, paths: dict, prefix: str, wanted) -> list:
         """Загрузить записанные слои в QGIS (имя слоя = имя файла); строки для сообщения."""
