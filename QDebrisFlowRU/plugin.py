@@ -35,7 +35,8 @@ class DebrisFlowPlugin:
         # (простое закрытие окна по-прежнему не прерывает расчёт — так задумано)
         if self.dialog is not None:
             for w in (getattr(self.dialog, "worker", None),
-                      getattr(self.dialog, "sweep_worker", None)):
+                      getattr(self.dialog, "sweep_worker", None),
+                      getattr(self.dialog, "sweep_best_worker", None)):
                 if w is not None and w.isRunning():
                     w.cancel()
                     w.wait(30000)

@@ -1059,6 +1059,9 @@ class SweepWorker(QThread):
                 if cm_v is not None and h_max_arr is not None and cm_v < _best_Cm:
                     _best_Cm  = cm_v
                     _best_pkg = dict(
+                        run_id   = row_data["run_id"],
+                        sample   = dict(samples[row_data["run_id"]]),
+                        base_vol = base_vol,
                         h_max    = h_max_arr.copy(),
                         geo_info = geo_info,
                         params   = dict(
@@ -1308,6 +1311,7 @@ class DebrisFlowDialog(QDialog):
         # id of the line layer the hydrographs belong to (fids are per layer)
         self._hydro_layer_id = None
         self.sweep_worker    = None
+        self.sweep_best_worker = None
         self._sweep_results  = []
         self._sweep_best_pkg = None
         # widgets of the "Multiple-run analysis" tab (sub-tabs 1, 3, 4 and Cv/ρ of 2)
@@ -2420,6 +2424,11 @@ class DebrisFlowDialog(QDialog):
             self.log_box.append(
                 "⚠ Cancelling — the running simulation(s) stop at the next time step...")
             self.btn_sweep_cancel.setEnabled(False)
+        w = self.sweep_best_worker
+        if w is not None and w.isRunning():
+            w.cancel()
+            self.log_box.append("⚠ Stopping the rerun of the best run at the next time step...")
+            self.btn_sweep_cancel.setEnabled(False)
 
     def _on_sweep_run(self):
         """Validation, parameter assembly and launch of SweepWorker."""
@@ -2503,15 +2512,29 @@ class DebrisFlowDialog(QDialog):
         if not out_dir:
             QMessageBox.warning(
                 self, "Error", "Specify an output folder."); return
+        # layers of the best run: prefix, selection, arrival depth and threshold of sub-tab 5;
+        # read now, so that edits during the analysis do not change them
+        prefix = re.sub(r"[^\w\-]", "_", L.edit_prefix.text().strip())
+        if not prefix:
+            QMessageBox.warning(self, "Error", "Specify a file prefix (\"5. Output\" sub-tab)."); return
+        self._sweep_out = dict(
+            prefix        = f"{prefix}_LHS_best",
+            wanted        = {k for k, chk in (("h_max", L.chk_h_max), ("V_max", L.chk_V_max),
+                                              ("HV2_max", L.chk_HV2_max), ("Fr_hv2", L.chk_Fr_hv2),
+                                              ("h_final", L.chk_h_final),
+                                              ("t_arrival", L.chk_t_arrival)) if chk.isChecked()},
+            arrival_depth = L.spin_arrival_thr.value(),
+            h_threshold   = (L.spin_threshold.value() if L.chk_threshold.isChecked() else 0.0),
+        )
         csv_name = self.edit_sweep_csv.text().strip() or "sweep_results.csv"
         if os.path.exists(os.path.join(out_dir, csv_name)):
-            # the CSV, <csv>_context.json and best_h_max_<csv>.tif of the previous analysis
+            # the CSV, <csv>_context.json and the best-run layers of the previous analysis
             # would be overwritten without a trace
             if QMessageBox.question(
                     self, "File exists",
                     f"{os.path.join(out_dir, csv_name)} already exists.\n"
                     "Overwrite the results of the previous LHS analysis\n"
-                    "(CSV, _context.json and the best h_max raster)?",
+                    "(CSV, _context.json and the layers of the best run)?",
                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
                 return
 
@@ -2609,6 +2632,9 @@ class DebrisFlowDialog(QDialog):
             QMessageBox.critical(self, "DEM", f"Cannot read the DEM:\n{type(e).__name__}: {e}")
             return
 
+        # kept for the rerun of the best run (layers are already detached)
+        self._sweep_params = params
+
         self._sweep_results  = []
         self._sweep_best_pkg = None
         self.log_box.clear()
@@ -2690,47 +2716,112 @@ class DebrisFlowDialog(QDialog):
         else:
             self.log_box.append("\n⚠ No successful runs for CSV.")
 
-        # ── h_max raster layer of the best run ───────────────────────────────
-        raster_path = None
+        # ── selected layers of the best run: one rerun with its exact parameters ─
         if self._sweep_best_pkg is not None:
-            base = csv_name.replace(".csv", "")
-            raster_path = os.path.join(out_dir, f"best_h_max_{base}.tif")
-            try:
-                from .qgis_runner import write_geotiff
-                # Apply the threshold: pixels < threshold → 0 → nodata (zero_as_nodata=True)
-                thr   = self.spin_depth_thr.value()
-                h_out = self._sweep_best_pkg["h_max"].copy()
-                h_out[h_out < thr] = 0.0
-                write_geotiff(
-                    h_out,
-                    self._sweep_best_pkg["geo_info"],
-                    raster_path,
-                    zero_as_nodata=True,
-                )
-                self.log_box.append(
-                    f"🗺 h_max raster (threshold ≥ {thr:.2f} m): {raster_path}")
-                from qgis.core import QgsRasterLayer, QgsProject
-                rlayer = QgsRasterLayer(raster_path, "LHS_best_h_max")
-                if rlayer.isValid():
-                    QgsProject.instance().addMapLayer(rlayer)
-                    # Apply pseudocolour (depth style)
-                    try:
-                        from .plugin import DebrisFlowPlugin
-                        DebrisFlowPlugin._apply_pseudocolour(rlayer, "depth")
-                    except Exception:
-                        pass
-                else:
-                    self.log_box.append(
-                        "⚠ The raster was created but cannot be loaded into QGIS.")
-            except Exception as e:
-                self.log_box.append(
-                    f"⚠ Error creating the raster: {e}")
-                raster_path = None
+            if self.sweep_worker is not None and self.sweep_worker._cancelled:
+                # stopped by the user: no extra rerun after Stop
+                self.log_box.append("\nThe analysis was stopped: the layers of the best run are not written.")
+            elif self._sweep_out["wanted"]:
+                self._start_best_rerun(out_dir, csv_path)
+                return   # the results window opens after the rerun
+            else:
+                self.log_box.append("\nNo output layers selected on the \"5. Output\" sub-tab: "
+                        "the layers of the best run are not written.")
+        self._show_sweep_results(None, csv_path)
 
-        # ── Results dialog ─────────────────────────────────────────────────────
+    def _show_sweep_results(self, raster_path, csv_path):
+        """LHS results window (modal)."""
         dlg = SweepResultsDialog(
             self, self._sweep_results, raster_path, csv_path)
         dlg.exec_()
+
+    def _start_best_rerun(self, out_dir, csv_path):
+        """Rerun the best LHS run with its exact sample (same code as the single run) and
+        write the layers selected on sub-tab 5; h_max is checked against the LHS run."""
+        import dataclasses
+        from .core.rheology import OBrienParameters
+        pkg, sp, so = self._sweep_best_pkg, self._sweep_params, self._sweep_out
+        smp = pkg["sample"]
+        # as in sweep_runner.run_one_sample: volume scale and rheology of this sample
+        target_vol = float(smp.get("vol", pkg["base_vol"]))
+        scale = target_vol / pkg["base_vol"]
+        ob_default = {f.name: f.default for f in dataclasses.fields(OBrienParameters)}
+        params = {
+            "dem_layer":        sp["dem_layer"],
+            "source_layer":     sp["source_layer"],
+            "dem_crs":          sp["dem_crs"],
+            "sources":          [dict(src, q_vals=(np.asarray(src["q_vals"], dtype=np.float64)
+                                                * scale).tolist()) for src in sp["sources"]],
+            "output_dir":       out_dir,
+            "output_prefix":    so["prefix"],
+            "output_layers":    so["wanted"],
+            "Cv":               sp["Cv"],
+            "Cv_max":           sp["Cv_max"],
+            "rho_s":            sp["rho_s"],
+            "rho_w":            sp["rho_w"],
+            "direct_mode":      True,
+            "tau_yield_direct": float(smp["tau_yield"]),
+            "eta_direct":       float(smp["eta"]),
+            "alpha1":           ob_default["alpha1"],
+            "beta1":            ob_default["beta1"],
+            "alpha2":           ob_default["alpha2"],
+            "beta2":            ob_default["beta2"],
+            "manning_n":        float(smp["manning_n"]),
+            "K_visc":           float(smp["K_visc"]),
+            "cfl_number":       sp["cfl_number"],
+            "face_depth_limiter": sp["face_depth_limiter"],
+            "theta":            sp["theta"],
+            "t_end":            sp["t_end"],
+            "dt_max":           sp["dt_max"],
+            "arrival_depth":    so["arrival_depth"],
+            "h_threshold":      so["h_threshold"],
+            "lhs_best_run":     dict(run_id=pkg["run_id"], csv=csv_path, sample=smp,
+                                       base_volume_m3=pkg["base_vol"], metrics=pkg["metrics"]),
+        }
+        if sp.get("_dem_preloaded") is not None:
+            params["_dem_preloaded"] = sp["_dem_preloaded"]
+        self.log_box.append(f"\n▶ Rerun of the best run #{pkg['run_id']} (Cm = {pkg['metrics'].get('Cm')}) "
+            f"with its exact parameters to write the selected layers:\n"
+            f"  V = {target_vol:.0f} m³, τy = {smp['tau_yield']:.2f} Pa, η = {smp['eta']:.3f} Pa·s, "
+            f"n = {smp['manning_n']:.4f}, K = {smp['K_visc']:.2f}")
+        self._sweep_csv_path = csv_path
+        self.btn_sweep_run.setEnabled(False)
+        self.btn_sweep_cancel.setEnabled(True)
+        self.progress_bar.setValue(0)
+        self.sweep_best_worker = SimulationWorker(params)
+        self.sweep_best_worker.progress.connect(self._on_progress)
+        self.sweep_best_worker.log_message.connect(self._on_log)
+        self.sweep_best_worker.finished.connect(self._on_best_rerun_finished)
+        self.sweep_best_worker.error.connect(self._on_best_rerun_error)
+        self.sweep_best_worker.cancelled.connect(self._on_best_rerun_cancelled)
+        self.sweep_best_worker.start()
+
+    def _end_best_rerun(self):
+        self.btn_sweep_run.setEnabled(True)
+        self.btn_sweep_cancel.setEnabled(False)
+
+    def _on_best_rerun_finished(self, payload: dict):
+        """Rerun of the best run done: check h_max, load the layers, show the results."""
+        self._end_best_rerun()
+        self.progress_bar.setValue(100)
+        d = float(np.max(np.abs(payload["result"].h_max - self._sweep_best_pkg["h_max"])))
+        self.log_box.append(f"  Check: max |h_max(rerun) − h_max(LHS run)| = {d:.3g} m"
+            + (" ✓" if d == 0.0 else "  ⚠ the rerun differs from the LHS run"))
+        lines = self._load_result_layers(payload["paths"], payload["prefix"], payload["wanted"])
+        self.log_box.append("Layers of the best run added to QGIS:\n" + "\n".join(lines))
+        self._show_sweep_results(payload["paths"].get(f"{payload['prefix']}_h_max"),
+                                 self._sweep_csv_path)
+
+    def _on_best_rerun_error(self, msg: str):
+        self._end_best_rerun()
+        self.log_box.append(f"\n⛔ Rerun of the best run failed:\n{msg}")
+        QMessageBox.critical(self, "LHS analysis", msg[:700])
+        self._show_sweep_results(None, self._sweep_csv_path)
+
+    def _on_best_rerun_cancelled(self):
+        self._end_best_rerun()
+        self.progress_bar.setValue(0)
+        self._show_sweep_results(None, self._sweep_csv_path)
 
     def _browse_save_file(self, p=None):
         """File-selection dialog for saving parameters."""
@@ -3458,6 +3549,16 @@ class DebrisFlowDialog(QDialog):
         prefix  = payload["prefix"]
         wanted  = payload["wanted"]
 
+        lines = self._load_result_layers(paths, prefix, wanted)
+
+        folder = list(paths.values())[0] if paths else out_dir
+        QMessageBox.information(
+            self, "Simulation completed",
+            "Layers added to QGIS:\n" + "\n".join(lines) +
+            f"\n\nFolder:\n{os.path.dirname(folder)}")
+
+    def _load_result_layers(self, paths: dict, prefix: str, wanted) -> list:
+        """Load the written layers into QGIS (layer name = file name); lines for the message."""
         # Nice names for the message
         layer_names = {
             "h_max":     "Peak thickness",
@@ -3483,12 +3584,7 @@ class DebrisFlowDialog(QDialog):
                     "time"     if key == "t_arrival" else "depth")))
             DebrisFlowPlugin.load_result_layer(path, name, style)
             lines.append(f"  • {name}  — {layer_names.get(key,'')}")
-
-        folder = list(paths.values())[0] if paths else out_dir
-        QMessageBox.information(
-            self, "Simulation completed",
-            "Layers added to QGIS:\n" + "\n".join(lines) +
-            f"\n\nFolder:\n{os.path.dirname(folder)}")
+        return lines
 
     def _on_error(self, msg: str):
         self.btn_stop.setEnabled(False)
