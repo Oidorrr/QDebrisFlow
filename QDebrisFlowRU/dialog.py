@@ -3062,8 +3062,9 @@ class DebrisFlowDialog(QDialog):
         # --- O'Brien ---
         ob = data.get("obrien", {})
         if ob:
-            _sv = lambda spin, key, default=None: (
-                spin.setValue(ob[key]) if key in ob else None)
+            def _sv(spin, key):
+                if key in ob:
+                    spin.setValue(ob[key])
             _sv(p.spin_Cv,     "Cv")
             _sv(p.spin_Cv_max, "Cv_max")
             if "rho_s"  in ob: p.spin_rho_s.setValue(ob["rho_s"])
