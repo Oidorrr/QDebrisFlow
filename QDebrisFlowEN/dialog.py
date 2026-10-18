@@ -1904,8 +1904,8 @@ class DebrisFlowDialog(QDialog):
         arr_row = QHBoxLayout()
         arr_row.addWidget(QLabel("   arrival when depth ≥"))
         p.spin_arrival_thr = QDoubleSpinBox()
-        p.spin_arrival_thr.setRange(0.005, 5.0); p.spin_arrival_thr.setValue(0.005)
         p.spin_arrival_thr.setDecimals(3); p.spin_arrival_thr.setSingleStep(0.05)
+        p.spin_arrival_thr.setRange(0.005, 5.0); p.spin_arrival_thr.setValue(0.005)
         p.spin_arrival_thr.setSuffix(" m")
         p.spin_arrival_thr.setToolTip(
             "Depth at which a cell counts as reached for t_arrival.\n"
