@@ -1383,12 +1383,7 @@ class DebrisFlowDialog(QDialog):
         btns.addWidget(self.btn_stop)
         out_single.layout().addLayout(btns)
 
-        # журнал LHS и кнопки запуска (подвкладка 4 анализа прогонов)
-        self.sweep_log_box = QTextEdit()
-        self.sweep_log_box.setReadOnly(True)
-        self.sweep_log_box.setFont(QFont("Courier", 9))
-        self.sweep_log_box.setMaximumHeight(130)
-        out_lhs.layout().addWidget(self.sweep_log_box)
+        # кнопки запуска LHS (журнал — общий, внизу окна)
         btn_row = QHBoxLayout()
         self.btn_sweep_run = QPushButton("▶  Запустить LHS-анализ")
         self.btn_sweep_run.setStyleSheet("font-weight:bold; padding:6px;")
@@ -2468,7 +2463,7 @@ class DebrisFlowDialog(QDialog):
     def _on_sweep_cancel(self):
         if self.sweep_worker and self.sweep_worker.isRunning():
             self.sweep_worker.cancel()
-            self.sweep_log_box.append(
+            self.log_box.append(
                 "⚠ Отмена — идущие прогоны остановятся на ближайшем шаге...")
             self.btn_sweep_cancel.setEnabled(False)
 
@@ -2665,7 +2660,7 @@ class DebrisFlowDialog(QDialog):
 
         self._sweep_results  = []
         self._sweep_best_pkg = None
-        self.sweep_log_box.clear()
+        self.log_box.clear()
         self.progress_bar.setValue(0)
         self.btn_sweep_run.setEnabled(False)
         self.btn_sweep_cancel.setEnabled(True)
@@ -2675,7 +2670,7 @@ class DebrisFlowDialog(QDialog):
                 return f"{s_min.value():{fmt}} – {s_max.value():{fmt}}"
             return f"{s_fix.value():{fmt}} (фиксирован)"
 
-        self.sweep_log_box.append(
+        self.log_box.append(
             f"Запуск LHS-анализа: {params['n_runs']} прогонов…\n"
             f"Объём: {_rtxt(self.chk_vol_vary, self.spin_vol_min, self.spin_vol_max, self.spin_vol_fixed, '.0f')} м³\n"
             f"τy: {_rtxt(self.chk_tau_vary, self.spin_tau_min, self.spin_tau_max, self.spin_tau_fixed, '.0f')} Па\n"
@@ -2700,8 +2695,8 @@ class DebrisFlowDialog(QDialog):
         self.progress_bar.setValue(int(100 * n / max(n_total, 1)))
 
     def _on_sweep_log_msg(self, msg: str):
-        self.sweep_log_box.append(msg)
-        sb = self.sweep_log_box.verticalScrollBar()
+        self.log_box.append(msg)
+        sb = self.log_box.verticalScrollBar()
         sb.setValue(sb.maximum())
 
     def _on_sweep_best_result(self, pkg: dict):
@@ -2711,7 +2706,7 @@ class DebrisFlowDialog(QDialog):
     def _on_sweep_error(self, msg: str):
         self.btn_sweep_run.setEnabled(True)
         self.btn_sweep_cancel.setEnabled(False)
-        self.sweep_log_box.append(f"\n⛔ ОШИБКА:\n{msg}")
+        self.log_box.append(f"\n⛔ ОШИБКА:\n{msg}")
         QMessageBox.critical(self, "Ошибка LHS-анализа", msg[:800])
 
     def _on_sweep_finished(self):
@@ -2722,7 +2717,7 @@ class DebrisFlowDialog(QDialog):
         elapsed_s = time.time() - getattr(self, "_t_sweep_start", time.time())
         n_ok = sum(1 for r in self._sweep_results if r.get("status") == "ok")
         avg_s = elapsed_s / max(n_ok, 1)
-        self.sweep_log_box.append(
+        self.log_box.append(
             f"\n✓ LHS завершён: {n_ok} прогонов за "
             f"{elapsed_s:.0f} с ({elapsed_s/60:.1f} мин), "
             f"ср. {avg_s:.1f} с/прогон")
@@ -2740,9 +2735,9 @@ class DebrisFlowDialog(QDialog):
         if not os.path.isfile(csv_path):
             csv_path = None
         elif any(r.get("status") == "ok" for r in self._sweep_results):
-            self.sweep_log_box.append(f"\n📋 CSV сохранён: {csv_path}")
+            self.log_box.append(f"\n📋 CSV сохранён: {csv_path}")
         else:
-            self.sweep_log_box.append("\n⚠ Нет успешных прогонов для CSV.")
+            self.log_box.append("\n⚠ Нет успешных прогонов для CSV.")
 
         # ── Растровый слой h_max лучшего прогона ─────────────────────────────
         raster_path = None
@@ -2761,7 +2756,7 @@ class DebrisFlowDialog(QDialog):
                     raster_path,
                     zero_as_nodata=True,
                 )
-                self.sweep_log_box.append(
+                self.log_box.append(
                     f"🗺 Растр h_max (порог ≥ {thr:.2f} м): {raster_path}")
                 from qgis.core import QgsRasterLayer, QgsProject
                 rlayer = QgsRasterLayer(raster_path, "LHS_best_h_max")
@@ -2774,10 +2769,10 @@ class DebrisFlowDialog(QDialog):
                     except Exception:
                         pass
                 else:
-                    self.sweep_log_box.append(
+                    self.log_box.append(
                         "⚠ Растр создан, но не может быть загружен в QGIS.")
             except Exception as e:
-                self.sweep_log_box.append(
+                self.log_box.append(
                     f"⚠ Ошибка создания растра: {e}")
                 raster_path = None
 
