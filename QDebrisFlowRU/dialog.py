@@ -3474,6 +3474,8 @@ class DebrisFlowDialog(QDialog):
             "output_layers":    wanted,
             "Cv":               Cv,
             "Cv_max":           Cv_max,
+            "rho_s":            self.spin_rho_s.value(),
+            "rho_w":            self.spin_rho_w.value(),
             "direct_mode":      direct,
             "tau_yield_direct": self.spin_tau.value() if direct else 0.0,
             "eta_direct":       self.spin_eta.value() if direct else 0.0,
