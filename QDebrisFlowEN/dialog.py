@@ -26,7 +26,7 @@ from qgis.PyQt.QtWidgets import (
     QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox,
     QHBoxLayout, QHeaderView, QLabel, QLineEdit,
     QMessageBox, QProgressBar, QPushButton, QRadioButton,
-    QButtonGroup, QScrollArea, QSizePolicy, QSpinBox, QTabWidget,
+    QButtonGroup, QScrollArea, QSpinBox, QTabWidget,
     QTableWidget, QTableWidgetItem, QTextEdit, QVBoxLayout,
     QWidget,
 )
@@ -849,7 +849,7 @@ class SweepWorker(QThread):
     # ── main method ─────────────────────────────────────────────────────────
 
     def run(self):
-        import sys, time
+        import time
         plugin_dir = os.path.dirname(os.path.abspath(__file__))
 
         # relative imports (see SimulationWorker.run)
@@ -1028,7 +1028,7 @@ class SweepWorker(QThread):
 
             # ── Helper function to process a single result ────────────────────
             def _process_result(row_data: dict):
-                nonlocal completed, _best_Cm, _best_pkg
+                nonlocal _best_Cm, _best_pkg
 
                 h_max_arr = row_data.pop("h_max", None)  # remove from the CSV row
                 eta_min   = round(

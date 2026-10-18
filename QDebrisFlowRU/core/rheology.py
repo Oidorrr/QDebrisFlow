@@ -81,7 +81,7 @@ class OBrienParameters:
         if not (0.0 < self.Cv < self.Cv_max):
             raise ValueError(f"Cv={self.Cv} должен быть в (0, {self.Cv_max})")
         if self.manning_n <= 0:
-            raise ValueError(f"Manning n должен быть > 0")
+            raise ValueError("Manning n должен быть > 0")
         if self.tau_yield_direct < 0 or self.eta_direct < 0:
             raise ValueError("tau_yield_direct и eta_direct не могут быть отрицательными")
         if self.tau_yield_direct > 0 and self.eta_direct <= 0:
