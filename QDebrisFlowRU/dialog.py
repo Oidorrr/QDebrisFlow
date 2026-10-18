@@ -1905,8 +1905,8 @@ class DebrisFlowDialog(QDialog):
         arr_row = QHBoxLayout()
         arr_row.addWidget(QLabel("   приход при глубине ≥"))
         p.spin_arrival_thr = QDoubleSpinBox()
-        p.spin_arrival_thr.setRange(0.005, 5.0); p.spin_arrival_thr.setValue(0.005)
         p.spin_arrival_thr.setDecimals(3); p.spin_arrival_thr.setSingleStep(0.05)
+        p.spin_arrival_thr.setRange(0.005, 5.0); p.spin_arrival_thr.setValue(0.005)
         p.spin_arrival_thr.setSuffix(" м")
         p.spin_arrival_thr.setToolTip(
             "Глубина, при которой ячейка считается достигнутой для t_arrival.\n"
