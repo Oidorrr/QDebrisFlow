@@ -4,7 +4,10 @@ QGIS-aware raster read/write helpers.
 """
 
 from __future__ import annotations
+import logging
 import numpy as np
+
+log = logging.getLogger(__name__)
 
 
 class RotatedRasterError(ValueError):
@@ -186,8 +189,9 @@ def write_geotiff(
             srs = osr.SpatialReference()
             srs.ImportFromWkt(crs.toWkt())
             ds.SetProjection(srs.ExportToWkt())
-        except Exception:
-            pass
+        except Exception as e:
+            # the GeoTIFF is still written, only without the CRS
+            log.warning("CRS not written to %s: %s", path, e)
 
     band = ds.GetRasterBand(1)
     band.SetNoDataValue(nodata_value)

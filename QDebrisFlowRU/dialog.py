@@ -124,7 +124,7 @@ def _runtime_info() -> dict:
         from qgis.core import Qgis
         info["qgis"] = Qgis.version()
     except Exception:
-        pass
+        info["qgis"] = None
     return info
 
 
@@ -3286,8 +3286,8 @@ class DebrisFlowDialog(QDialog):
             rho_w = p.spin_rho_w.value()
             rho_m = rho_s * Cv + rho_w * (1.0 - Cv)
             p._lbl_rho_m.setText(f"{rho_m:.1f} кг/м³")
-        except Exception:
-            pass
+        except AttributeError:
+            return   # вызов до создания надписи ρm
 
     def _update_hstop(self):
         try:
@@ -3298,8 +3298,8 @@ class DebrisFlowDialog(QDialog):
             self._lbl_hstop.setText(
                 f"h_stop: {tau/(gamma_m*0.10):.3f} м (10%),  "
                 f"{tau/(gamma_m*0.05):.3f} м (5%)")
-        except Exception:
-            pass
+        except AttributeError:
+            return   # вызов до создания надписи h_stop
 
     def _browse_output(self, p=None):
         p = self if p is None else p
