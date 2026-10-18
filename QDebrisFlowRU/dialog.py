@@ -925,13 +925,6 @@ class SweepWorker(QThread):
             self.sweep_log.emit("Растеризация полигона инундации...")
             obs_mask = self._rasterize_polygon(p["obs_poly_wkts"], geo_info)
             self.sweep_log.emit(f"Наблюдаемая инундация: {obs_mask.sum()} ячеек")
-            eval_mask = None
-            if p.get("eval_poly_wkts"):
-                eval_mask = self._rasterize_polygon(p["eval_poly_wkts"], geo_info)
-                obs_out = int(np.sum(obs_mask & ~eval_mask))
-                self.sweep_log.emit(
-                    f"Область оценки: {int(eval_mask.sum())} ячеек"
-                    + (f" (⚠ {obs_out} наблюдённых ячеек вне её)" if obs_out else ""))
 
             # ── Точки глубин ──────────────────────────────────────────────────
             self.sweep_log.emit("Чтение точек глубин...")
@@ -987,7 +980,6 @@ class SweepWorker(QThread):
                 src_cells       = src_cells,
                 base_vol        = base_vol,
                 obs_mask        = obs_mask,
-                eval_mask       = eval_mask,
                 obs_rows        = obs_rows,
                 obs_cols        = obs_cols,
                 obs_depths      = obs_depths,
@@ -1299,14 +1291,13 @@ class _RunPanel:
 
 class DebrisFlowDialog(QDialog):
     """
-    Диалог симуляции с двумя вкладками верхнего уровня, «Одиночный прогон» и
-    «Анализ множественных прогонов (LHS-анализ)», в каждой четыре подвкладки:
-      1. Слои и источники   — DEM, линейный слой, таблица источников
-      2. Параметры O'Brien  — реология; во вкладке LHS: Cv, плотности,
-                              наблюдения, диапазоны, запуск анализа
-      3. Настройки решателя — временные параметры
-      4. Выходные данные    — папка, prefix, выбор слоёв;
-                              во вкладке LHS ещё и настройки анализа
+    Диалог симуляции с двумя вкладками верхнего уровня.
+    «Одиночный прогон»: 1. Слои и источники, 2. Параметры O'Brien (реология),
+      3. Настройки решателя, 4. Выходные данные (+ кнопки запуска).
+    «Анализ множественных прогонов (LHS-анализ)»: 1. Слои и источники, 2. O'Brien
+      (Cv, плотности), 3. Настройки LHS (файл настроек, наблюдения, диапазоны,
+      настройки анализа), 4. Настройки решателя, 5. Выходные данные (+ кнопки запуска).
+    Индикатор прогресса и журнал внизу окна — общие для обеих вкладок.
     """
 
     def __init__(self, iface):
@@ -1333,7 +1324,8 @@ class DebrisFlowDialog(QDialog):
     def _build_ui(self):
         main = QVBoxLayout(self)
 
-        # две вкладки верхнего уровня с одинаковыми четырьмя подвкладками; у каждой свои
+        # две вкладки верхнего уровня; подвкладки 1, 2, решателя и вывода есть в обеих, у каждой
+        # вкладки свои виджеты («3. Настройки LHS» — только в анализе прогонов);
         # виджеты: одиночный прогон — в самом диалоге, анализ прогонов — в self.lhs
         self.tabs_single = QTabWidget()
         self.tabs_single.addTab(self._with_apply(self._tab_sources(self), 1, self, self.lhs),
@@ -1348,13 +1340,14 @@ class DebrisFlowDialog(QDialog):
         self.tabs_lhs = QTabWidget()
         self.tabs_lhs.addTab(self._with_apply(self._tab_sources(self.lhs), 1, self.lhs, self),
                 "1. Слои и источники")
-        self.tabs_lhs.addTab(self._with_apply(self._tab_sweep(), 2, self.lhs, self),
-                "2. Параметры O'Brien (LHS-анализ)")
+        self.tabs_lhs.addTab(self._with_apply(self._tab_lhs_rheology(), 2, self.lhs, self),
+                "2. O'Brien")
+        self.tabs_lhs.addTab(self._tab_sweep(), "3. Настройки LHS")
         self.tabs_lhs.addTab(self._with_apply(self._tab_solver(self.lhs), 3, self.lhs, self),
-                "3. Настройки решателя")
-        out_lhs = self._with_apply(self._tab_lhs_output(), 4, self.lhs, self)
+                "4. Настройки решателя")
+        out_lhs = self._with_apply(self._tab_output(self.lhs), 4, self.lhs, self)
         self.tabs_lhs.addTab(out_lhs,
-                "4. Выходные данные")
+                "5. Выходные данные")
         self.tabs = QTabWidget()
         self.tabs.addTab(self.tabs_single, "Одиночный прогон")
         self.tabs.addTab(self.tabs_lhs,    "Анализ множественных прогонов (LHS-анализ)")
@@ -2008,7 +2001,15 @@ class DebrisFlowDialog(QDialog):
         layout.addStretch()
         return w
 
-    # ── Вкладка 5: LHS-анализ ────────────────────────────────────────────────
+    def _tab_lhs_rheology(self) -> QWidget:
+        """Подвкладка 2 анализа прогонов: только Cv, Cv_max, ρs, ρw."""
+        w = QWidget()
+        layout = QVBoxLayout(w)
+        self._grp_conc_rho(self.lhs, layout)
+        layout.addStretch()
+        return w
+
+    # ── Анализ прогонов: подвкладка 3 «Настройки LHS» ───────────────────────────
 
     def _tab_sweep(self) -> QWidget:
         w  = QWidget()
@@ -2077,19 +2078,6 @@ class DebrisFlowDialog(QDialog):
             "Используется для расчёта TP, FP, FN, ΩTm.")
         fl_obs.addRow("Зона инундации (SHP):", self.combo_obs_poly)
 
-        self.combo_eval_poly = QgsMapLayerComboBox()
-        self.combo_eval_poly.setFilters(QgsMapLayerProxyModel.PolygonLayer)
-        self.combo_eval_poly.setAllowEmptyLayer(True)
-        self.combo_eval_poly.setLayer(None)
-        self.combo_eval_poly.setToolTip(
-            "Необязательный полигон области, где картировалось затопление.\n"
-            "Ячейки вне него не учитываются в TP/FP/FN, чтобы поток в руслах\n"
-            "выше картированной зоны не считался переохватом.\n"
-            "Пусто — вся ЦМР (прежнее поведение).\n"
-            "⚠ Это полигон КАРТИРОВАННОЙ территории, а не полигон затопления:\n"
-            "если выбрать здесь сам полигон затопления, FP ≡ 0.")
-        fl_obs.addRow("Область оценки (необяз.):", self.combo_eval_poly)
-
         self.combo_obs_pts = QgsMapLayerComboBox()
         self.combo_obs_pts.setFilters(QgsMapLayerProxyModel.PointLayer)
         self.combo_obs_pts.setToolTip(
@@ -2115,8 +2103,6 @@ class DebrisFlowDialog(QDialog):
             "Barnhart et al. (2021) обосновывают 0.5 м (Section 7.2).")
         fl_obs.addRow("Порог глубины:", self.spin_depth_thr)
         lo.addWidget(grp_obs)
-
-        self._grp_conc_rho(self.lhs, lo)
 
         # ── Параметры: диапазон или фиксированное значение ───────────────────
         grp_rng = QGroupBox(
@@ -2207,7 +2193,7 @@ class DebrisFlowDialog(QDialog):
                    rng=(0.001, 10000.0))
 
         # Фиксированные значения задаются прямо в этой вкладке.
-        # (Cv задаётся на этой подвкладке.)
+        # (Cv задаётся на подвкладке «2. O'Brien».)
         note_rng = QLabel(
             "Включён — параметр варьируется в диапазоне (LHS-выборка).  "
             "Выключен — параметр фиксирован, одно значение для всех прогонов.\n"
@@ -2217,6 +2203,7 @@ class DebrisFlowDialog(QDialog):
         note_rng.setStyleSheet("color:#777;font-size:10px;margin-top:2px")
         rng_lo.addWidget(note_rng)
         lo.addWidget(grp_rng)
+        lo.addWidget(self._grp_sweep_cfg())
 
         # Оборачиваем в QScrollArea для работы на ноутбуках
         scroll = QScrollArea()
@@ -2226,7 +2213,8 @@ class DebrisFlowDialog(QDialog):
         return scroll
 
     def _grp_sweep_cfg(self) -> QGroupBox:
-        """Группа «Настройки анализа»: число прогонов, seed, потоки, папка, CSV."""
+        """Группа «Настройки анализа»: число прогонов, seed, потоки, имя CSV
+        (папка — та, что на подвкладке «5. Выходные данные»)."""
         grp_cfg = QGroupBox("Настройки анализа")
         fl_cfg  = QFormLayout(grp_cfg)
 
@@ -2259,32 +2247,12 @@ class DebrisFlowDialog(QDialog):
             "Максимум: 16.")
         fl_cfg.addRow("Параллельных ядер:", self.spin_n_workers)
 
-        out_row2 = QHBoxLayout()
-        self.edit_sweep_outdir = QLineEdit(os.path.expanduser("~/debris_sweep"))
-        btn_sweep_out = QPushButton("…")
-        btn_sweep_out.setFixedWidth(30)
-        btn_sweep_out.clicked.connect(self._browse_sweep_outdir)
-        out_row2.addWidget(self.edit_sweep_outdir)
-        out_row2.addWidget(btn_sweep_out)
-        fl_cfg.addRow("Папка результатов:", out_row2)
-
         self.edit_sweep_csv = QLineEdit("sweep_results.csv")
         self.edit_sweep_csv.setToolTip(
             "Имя CSV-файла (сохраняется в папке результатов).\n"
             "Содержит все 5 параметров (V, τy, η, n, K) + метрики для каждого сценария.")
         fl_cfg.addRow("Файл CSV:", self.edit_sweep_csv)
         return grp_cfg
-
-    def _tab_lhs_output(self) -> QWidget:
-        """Подвкладка 4 анализа прогонов: подвкладка вывода + настройки анализа."""
-        w = self._tab_output(self.lhs)
-        lo = w.layout()
-        lo.insertWidget(lo.count() - 1, self._grp_sweep_cfg())   # перед завершающим stretch
-        scroll = QScrollArea()
-        scroll.setWidget(w)
-        scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        return scroll
 
     # ── Слоты вкладки 5 ──────────────────────────────────────────────────────
 
@@ -2331,7 +2299,6 @@ class DebrisFlowDialog(QDialog):
         payload = {
             "version":         "lhs_1.0",
             "obs_poly_name":   _layer_name(self.combo_obs_poly),
-            "eval_poly_name":  _layer_name(self.combo_eval_poly),
             "obs_pts_name":    _layer_name(self.combo_obs_pts),
             "depth_field":     self.combo_depth_field.currentText(),
             "depth_threshold": self.spin_depth_thr.value(),
@@ -2360,7 +2327,7 @@ class DebrisFlowDialog(QDialog):
             "n_runs":    self.spin_n_runs.value(),
             "n_workers": self.spin_n_workers.value(),
             "seed":      self.spin_seed.value(),
-            "out_dir":   self.edit_sweep_outdir.text(),
+            "out_dir":   self.lhs.edit_outdir.text(),
             "csv_name":  self.edit_sweep_csv.text(),
         }
         try:
@@ -2409,11 +2376,6 @@ class DebrisFlowDialog(QDialog):
                 warnings.append(f"Слой «{name}» не найден в проекте.")
 
         _set_layer(self.combo_obs_poly, d.get("obs_poly_name", ""))
-        if d.get("eval_poly_name"):
-            _set_layer(self.combo_eval_poly, d["eval_poly_name"])
-        else:
-            # необязательный слой: пустое имя означает «без области оценки», а не «оставить прежнюю»
-            self.combo_eval_poly.setLayer(None)
         _set_layer(self.combo_obs_pts,  d.get("obs_pts_name",  ""))
         if d.get("depth_field"):
             idx = self.combo_depth_field.findText(d["depth_field"])
@@ -2443,7 +2405,7 @@ class DebrisFlowDialog(QDialog):
         if "n_runs"  in d: self.spin_n_runs.setValue(int(d["n_runs"]))
         if "n_workers" in d: self.spin_n_workers.setValue(int(d["n_workers"]))
         if "seed"    in d: self.spin_seed.setValue(int(d["seed"]))
-        if "out_dir" in d: self.edit_sweep_outdir.setText(d["out_dir"])
+        if "out_dir" in d: self.lhs.edit_outdir.setText(d["out_dir"])
         if "csv_name" in d: self.edit_sweep_csv.setText(d["csv_name"])
 
         msg = "Настройки LHS загружены."
@@ -2452,13 +2414,6 @@ class DebrisFlowDialog(QDialog):
             QMessageBox.warning(self, "LHS загружен (с предупреждениями)", msg)
         else:
             QMessageBox.information(self, "Настройки LHS загружены", msg)
-
-    def _browse_sweep_outdir(self):
-        path = QFileDialog.getExistingDirectory(
-            self, "Папка для результатов LHS-анализа",
-            self.edit_sweep_outdir.text())
-        if path:
-            self.edit_sweep_outdir.setText(path)
 
     def _on_sweep_cancel(self):
         if self.sweep_worker and self.sweep_worker.isRunning():
@@ -2545,7 +2500,7 @@ class DebrisFlowDialog(QDialog):
             QMessageBox.warning(self, "Ошибка диапазонов",
                                  "\n".join(err)); return
 
-        out_dir = self.edit_sweep_outdir.text().strip()
+        out_dir = self.lhs.edit_outdir.text().strip()
         if not out_dir:
             QMessageBox.warning(
                 self, "Ошибка", "Укажите папку для результатов."); return
@@ -2630,9 +2585,6 @@ class DebrisFlowDialog(QDialog):
             obs_poly_layer  = obs_poly,
             obs_poly_wkts   = _layer_wkts(obs_poly, dem_layer.crs()),
             obs_pts         = _layer_points(obs_pts, depth_fld, dem_layer.crs()),
-            eval_poly_wkts  = (_layer_wkts(self.combo_eval_poly.currentLayer(), dem_layer.crs())
-                               if self.combo_eval_poly.currentLayer() is not None else None),
-            eval_poly_layer = self.combo_eval_poly.currentLayer(),
             obs_pts_layer   = obs_pts,
             depth_field     = depth_fld,
             depth_threshold = self.spin_depth_thr.value(),
@@ -2726,7 +2678,7 @@ class DebrisFlowDialog(QDialog):
             QMessageBox.warning(
                 self, "LHS-анализ", "Нет успешных прогонов."); return
 
-        out_dir  = self.edit_sweep_outdir.text().strip()
+        out_dir  = self.lhs.edit_outdir.text().strip()
         csv_name = self.edit_sweep_csv.text().strip() or "sweep_results.csv"
         csv_path = os.path.join(out_dir, csv_name)
         os.makedirs(out_dir, exist_ok=True)
