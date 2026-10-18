@@ -238,7 +238,7 @@ def _check_dem_crs(dem_layer) -> str:
                 "reprojection of the vector layers cannot be checked.\n"
                 "Assign the correct projected CRS in metres (Layer Properties → Source) and run again.")
     from qgis.core import QgsUnitTypes
-    if crs.mapUnits() != QgsUnitTypes.DistanceMeters:
+    if crs.mapUnits() != QgsUnitTypes.DistanceUnit.DistanceMeters:
         # the solver takes the cell size and depths as metres (feet would give a 10.76× area)
         return (f"The DEM CRS ({crs.authid()}) is not in metres "
                 f"({QgsUnitTypes.toString(crs.mapUnits())}): the solver treats the cell size as metres.\n"
@@ -340,7 +340,7 @@ class HydrographEditorDialog(QDialog):
         self.table = QTableWidget()
         self.table.setColumnCount(2)
         self.table.setHorizontalHeaderLabels(["Time (s)", "Q (m³/s)"])
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.table.setRowCount(4)
         defaults = [(0, 0), (300, 100), (600, 50), (900, 0)]
         for i, (t, q) in enumerate(defaults):
@@ -374,7 +374,7 @@ class HydrographEditorDialog(QDialog):
 
         # OK / Cancel buttons
         btns = QDialogButtonBox(
-            QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         btns.accepted.connect(self._on_ok)
         btns.rejected.connect(self.reject)
         layout.addWidget(btns)
@@ -1452,7 +1452,7 @@ class DebrisFlowDialog(QDialog):
         grp_dem = QGroupBox("Digital Elevation Model (DEM)")
         fl_dem = QFormLayout(grp_dem)
         p.dem_combo = QgsMapLayerComboBox()
-        p.dem_combo.setFilters(QgsMapLayerProxyModel.RasterLayer)
+        p.dem_combo.setFilters(QgsMapLayerProxyModel.Filter.RasterLayer)
         fl_dem.addRow("DEM layer:", p.dem_combo)
         layout.addWidget(grp_dem)
 
@@ -1462,7 +1462,7 @@ class DebrisFlowDialog(QDialog):
 
         src_row = QHBoxLayout()
         p.src_line_combo = QgsMapLayerComboBox()
-        p.src_line_combo.setFilters(QgsMapLayerProxyModel.LineLayer)
+        p.src_line_combo.setFilters(QgsMapLayerProxyModel.Filter.LineLayer)
         src_row.addWidget(p.src_line_combo)
         btn_load = QPushButton("⟳ Load features")
         btn_load.setToolTip(
@@ -1484,13 +1484,13 @@ class DebrisFlowDialog(QDialog):
         p.tbl_sources.setHorizontalHeaderLabels(
             ["ID", "Description", "Q_max (m³/s)", "V to t_end (m³)", "Hydrograph"])
         hdr = p.tbl_sources.horizontalHeader()
-        hdr.setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        hdr.setSectionResizeMode(1, QHeaderView.Stretch)
-        hdr.setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        hdr.setSectionResizeMode(3, QHeaderView.ResizeToContents)
-        hdr.setSectionResizeMode(4, QHeaderView.ResizeToContents)
-        p.tbl_sources.setSelectionBehavior(QTableWidget.SelectRows)
-        p.tbl_sources.setEditTriggers(QTableWidget.NoEditTriggers)
+        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        p.tbl_sources.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        p.tbl_sources.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         p.tbl_sources.setMinimumHeight(160)
         lay_src.addWidget(p.tbl_sources)
 
@@ -2076,14 +2076,14 @@ class DebrisFlowDialog(QDialog):
         fl_obs  = QFormLayout(grp_obs)
 
         self.combo_obs_poly = QgsMapLayerComboBox()
-        self.combo_obs_poly.setFilters(QgsMapLayerProxyModel.PolygonLayer)
+        self.combo_obs_poly.setFilters(QgsMapLayerProxyModel.Filter.PolygonLayer)
         self.combo_obs_poly.setToolTip(
             "SHP layer of the real inundation zone (polygon).\n"
             "Used for computing TP, FP, FN, ΩTm.")
         fl_obs.addRow("Inundation zone (SHP):", self.combo_obs_poly)
 
         self.combo_obs_pts = QgsMapLayerComboBox()
-        self.combo_obs_pts.setFilters(QgsMapLayerProxyModel.PointLayer)
+        self.combo_obs_pts.setFilters(QgsMapLayerProxyModel.Filter.PointLayer)
         self.combo_obs_pts.setToolTip(
             "SHP layer of points with field measurements of peak flow depths.")
         self.combo_obs_pts.layerChanged.connect(self._on_obs_pts_changed)
@@ -2215,7 +2215,7 @@ class DebrisFlowDialog(QDialog):
         scroll = QScrollArea()
         scroll.setWidget(w)
         scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         return scroll
 
     def _grp_sweep_cfg(self) -> QGroupBox:
@@ -2538,7 +2538,7 @@ class DebrisFlowDialog(QDialog):
                     f"{os.path.join(out_dir, csv_name)} already exists.\n"
                     "Overwrite the results of the previous LHS analysis\n"
                     "(CSV, _context.json and the layers of the best run)?",
-                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
                 return
 
         # Assemble sources from the Tab 1 table
@@ -2736,7 +2736,7 @@ class DebrisFlowDialog(QDialog):
         """LHS results window (modal)."""
         dlg = SweepResultsDialog(
             self, self._sweep_results, raster_path, csv_path)
-        dlg.exec_()
+        dlg.exec()
 
     def _start_best_rerun(self, out_dir, csv_path):
         """Rerun the best LHS run with its exact sample (same code as the single run) and
@@ -3142,7 +3142,7 @@ class DebrisFlowDialog(QDialog):
             QMessageBox.warning(self, "No layer",
                                 "Select a source line layer.")
             return
-        if layer.geometryType() != QgsWkbTypes.LineGeometry:
+        if layer.geometryType() != QgsWkbTypes.GeometryType.LineGeometry:
             QMessageBox.warning(self, "Invalid type",
                                 "The layer must be a line layer (LineString).")
             return
@@ -3159,7 +3159,7 @@ class DebrisFlowDialog(QDialog):
                         f"Hydrographs loaded from the parameter file ({len(p._hydro_data)}) "
                         f"are not bound to a layer.\nApply them to the features of \"{layer.name()}\" "
                         "with the same IDs?",
-                        QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes) == QMessageBox.Yes)
+                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.Yes) == QMessageBox.StandardButton.Yes)
             if not keep:
                 p._hydro_data = {}
             p._hydro_layer_id = layer.id()
@@ -3206,17 +3206,17 @@ class DebrisFlowDialog(QDialog):
         p.tbl_sources.insertRow(row)
 
         id_item = QTableWidgetItem(str(fid))
-        id_item.setTextAlignment(Qt.AlignCenter)
-        id_item.setFlags(id_item.flags() & ~Qt.ItemIsEditable)
+        id_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        id_item.setFlags(id_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
         p.tbl_sources.setItem(row, 0, id_item)
 
         name_item = QTableWidgetItem(fname)
-        name_item.setFlags(name_item.flags() & ~Qt.ItemIsEditable)
+        name_item.setFlags(name_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
         p.tbl_sources.setItem(row, 1, name_item)
 
         q_item = QTableWidgetItem(q_text)
-        q_item.setTextAlignment(Qt.AlignCenter)
-        q_item.setFlags(q_item.flags() & ~Qt.ItemIsEditable)
+        q_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        q_item.setFlags(q_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
         p.tbl_sources.setItem(row, 2, q_item)
 
         btn = QPushButton("✏ Edit...")
@@ -3245,8 +3245,8 @@ class DebrisFlowDialog(QDialog):
                     after = hydrograph_volume(data["times"], data["q_vals"], t_end, 1e12)
                 txt = f"{v:.0f}" + (" ⚠" if after > 0 else "")
             item = QTableWidgetItem(txt)
-            item.setTextAlignment(Qt.AlignCenter)
-            item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+            item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
             item.setToolTip("Volume injected within [0, t_end]; ⚠ = part of the hydrograph lies after\n"
                         "t_end and will not be injected (increase the simulation duration).")
             p.tbl_sources.setItem(row, 3, item)
@@ -3262,7 +3262,7 @@ class DebrisFlowDialog(QDialog):
         init  = p._hydro_data.get(fid)
         dlg   = HydrographEditorDialog(self, fid, fname, init)
 
-        if dlg.exec_() == QDialog.Accepted:
+        if dlg.exec() == QDialog.DialogCode.Accepted:
             result = dlg.get_result()
             if result:
                 p._hydro_data[fid] = result
@@ -3634,7 +3634,7 @@ class SweepResultsDialog(QDialog):
 
         if not ok_rows:
             lo.addWidget(QLabel("No successful runs."))
-            bb = QDialogButtonBox(QDialogButtonBox.Close)
+            bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
             bb.rejected.connect(self.reject)
             lo.addWidget(bb)
             return
@@ -3707,9 +3707,9 @@ class SweepResultsDialog(QDialog):
         tbl = QTableWidget(min(10, n_ok), len(cols))
         tbl.setHorizontalHeaderLabels(col_lbl)
         hdr = tbl.horizontalHeader()
-        hdr.setSectionResizeMode(QHeaderView.ResizeToContents)
-        tbl.setEditTriggers(QTableWidget.NoEditTriggers)
-        tbl.setSelectionBehavior(QTableWidget.SelectRows)
+        hdr.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        tbl.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        tbl.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         tbl.setMaximumHeight(220)
 
         highlight = QColor(195, 225, 255)
@@ -3729,7 +3729,7 @@ class SweepResultsDialog(QDialog):
                 else:
                     text = str(v)
                 item = QTableWidgetItem(text)
-                item.setTextAlignment(Qt.AlignCenter)
+                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 if r_idx == 0:
                     item.setBackground(highlight)
                 tbl.setItem(r_idx, c_idx, item)
@@ -3771,8 +3771,8 @@ class SweepResultsDialog(QDialog):
             tbl = QTableWidget()
             tbl.setColumnCount(8)
             tbl.setHorizontalHeaderLabels(["Parameter", "Q1 (min.)", "Q2", "Q3", "Q4", "Q5 (max.)", "Cm spread", "ρ [95 % CI]"])
-            tbl.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-            tbl.setEditTriggers(QTableWidget.NoEditTriggers)
+            tbl.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+            tbl.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
             tbl.verticalHeader().setVisible(False)
             for param_key, param_label in params_sens:
                 vals = [(float(r.get(param_key)), cm_of[id(r)], r.get("run_id") or 0)
@@ -3785,7 +3785,7 @@ class SweepResultsDialog(QDialog):
                     tbl.insertRow(row_i)
                     for c_i, txt in enumerate([param_label] + ["—"] * 5 + ["fixed", "—"]):
                         cell = QTableWidgetItem(txt)
-                        cell.setTextAlignment(Qt.AlignCenter)
+                        cell.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                         tbl.setItem(row_i, c_i, cell)
                     continue
                 # ties in x are ordered by run, not by Cm
@@ -3811,27 +3811,27 @@ class SweepResultsDialog(QDialog):
                 row_i = tbl.rowCount()
                 tbl.insertRow(row_i)
                 lbl_item = QTableWidgetItem(param_label)
-                lbl_item.setTextAlignment(Qt.AlignCenter)
+                lbl_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 if is_important:
                     lbl_item.setForeground(QColor("#1565C0"))
-                    lbl_item.setFont(QFont("", -1, QFont.Bold))
+                    lbl_item.setFont(QFont("", -1, QFont.Weight.Bold))
                 tbl.setItem(row_i, 0, lbl_item)
                 for qi, cm_mean in enumerate(q_means):
                     cell = QTableWidgetItem(f"{cm_mean:.3f}" if cm_mean == cm_mean else "—")
-                    cell.setTextAlignment(Qt.AlignCenter)
+                    cell.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                     if cm_mean == cm_mean:
                         g = int(min(255, max(0, 255 * (1 - cm_mean))))
                         cell.setBackground(QColor(255 - g // 2, 255, 255 - g // 2))
                     tbl.setItem(row_i, qi + 1, cell)
                 spread_item = QTableWidgetItem(f"{spread:.3f}")
-                spread_item.setTextAlignment(Qt.AlignCenter)
+                spread_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 if is_important:
                     spread_item.setForeground(QColor("#C00000"))
-                    spread_item.setFont(QFont("", -1, QFont.Bold))
+                    spread_item.setFont(QFont("", -1, QFont.Weight.Bold))
                 tbl.setItem(row_i, 6, spread_item)
                 rho_item = QTableWidgetItem(
                     f"{rho:+.2f} [{lo:+.2f}; {hi:+.2f}]" if rho == rho else "—")
-                rho_item.setTextAlignment(Qt.AlignCenter)
+                rho_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 if sig:
                     rho_item.setForeground(QColor("#C00000"))
                 tbl.setItem(row_i, 7, rho_item)
@@ -3873,6 +3873,6 @@ class SweepResultsDialog(QDialog):
         lo.addWidget(scroll)
 
         # ── Close button ───────────────────────────────────────────────────────
-        bb = QDialogButtonBox(QDialogButtonBox.Close)
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         bb.rejected.connect(self.reject)
         lo.addWidget(bb)

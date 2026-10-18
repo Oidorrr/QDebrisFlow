@@ -90,7 +90,7 @@ class DebrisFlowPlugin:
 
             shader = QgsRasterShader()
             color_ramp = QgsColorRampShader()
-            color_ramp.setColorRampType(QgsColorRampShader.Interpolated)
+            color_ramp.setColorRampType(QgsColorRampShader.Type.Interpolated)
 
             if style == "depth":
                 items = [
@@ -135,4 +135,4 @@ class DebrisFlowPlugin:
         except Exception as e:
             from qgis.core import QgsMessageLog, Qgis
             QgsMessageLog.logMessage(f"стиль псевдоцвета не применён к {layer.name()}: "
-                                     f"{type(e).__name__}: {e}", "QDebrisFlow", Qgis.Warning)
+                                     f"{type(e).__name__}: {e}", "QDebrisFlow", Qgis.MessageLevel.Warning)
