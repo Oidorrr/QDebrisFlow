@@ -1,7 +1,8 @@
 """
 O'Brien & Julien (1985, 1988) rheological model — quadratic.
 
-Friction slope (FLO-2D):
+Friction slope (FLO-2D form with a constant Manning n; FLO-2D Simulating Mudflow
+Guidelines 2021, eq. 18, writes the third term with the turbulent-dispersive n_td):
     Sf = τy/(γm·h)  +  K·η·V/(8·γm·h²)  +  n²·V²/h^(4/3)
 
 Two modes for specifying τy and η
@@ -14,13 +15,21 @@ Mode 2 — EXPONENTIAL COEFFICIENTS (O'Brien & Julien 1988):
     τy = alpha1 × exp(beta1 × Cv)
     η  = alpha2 × exp(beta2 × Cv)
 
-Switching: if tau_yield_direct > 0 → Mode 1, otherwise → Mode 2.
+    NB: FLO-2D and O'Brien & Julien (1988) use the opposite indices:
+        η = α1·exp(β1·Cv),  τy = α2·exp(β2·Cv).
+    The FLO-2D coefficient table carries only the footnote "1 Pa = 10 dynes/cm²;
+    1 Pa·s = 10 poises"; coefficients in dynes/cm² and poises must be × 0.1.
+    Default alpha/beta below: source not established (τy ≈ 0.8 Pa, η ≈ 26 Pa·s at Cv = 0.40).
+
+Switching: the mode is set by direct_mode (True → Mode 1, False → Mode 2); with
+direct_mode=None the old rule applies: tau_yield_direct > 0 → Mode 1, otherwise → Mode 2.
 """
 
 from __future__ import annotations
 
 import numpy as np
 from dataclasses import dataclass, field
+from typing import Optional
 
 RHO_WATER:    float = 1000.0
 RHO_SEDIMENT: float = 2650.0
@@ -39,7 +48,7 @@ class OBrienParameters:
 
     # ── Mode 1: direct input of τy and η ─────────────────────────────────────
     tau_yield_direct: float = 0.0
-    """Yield stress [Pa]. If > 0 — used directly (Mode 1)."""
+    """Yield stress [Pa], used directly in Mode 1 (τy = 0 is allowed there: a purely viscous mixture)."""
 
     eta_direct: float = 0.0
     """Mixture viscosity [Pa·s]. Used together with tau_yield_direct."""
@@ -53,8 +62,13 @@ class OBrienParameters:
     # ── Turbulent term ─────────────────────────────────────────────────────────
     manning_n: float = 0.06
     K_visc:    float = 24.0  # shape factor for the viscous term (24 = wide channel)
+    # FLO-2D: K grows up to ~50 000 on rough channels, 2285 for most urban studies.
+    # K = 0 switches the viscous term off (in FLO-2D K = 0 means "compute from n").
 
     h_min: float = 0.005  # minimum depth of a wet cell [m]
+    # True → direct input (τy may be 0: purely viscous), False → exponential coefficients,
+    # None → legacy rule "direct if tau_yield_direct > 0" (kept for old callers)
+    direct_mode: Optional[bool] = None
 
     # ── Derived ────────────────────────────────────────────────────────────────
     rho_mixture:   float = field(init=False)
@@ -76,7 +90,11 @@ class OBrienParameters:
         self.rho_mixture   = self.rho_sediment * self.Cv + self.rho_water * (1.0 - self.Cv)
         self.gamma_mixture = self.rho_mixture * GRAVITY
 
-        self._direct_mode = self.tau_yield_direct > 0.0
+        # explicit mode wins; the legacy rule silently switched τy = 0 to the exponential mode
+        self._direct_mode = (self.tau_yield_direct > 0.0 if self.direct_mode is None
+                             else bool(self.direct_mode))
+        if self._direct_mode and self.eta_direct <= 0:
+            raise ValueError("In direct mode eta_direct > 0 must be specified")
         if self._direct_mode:
             self.tau_yield = self.tau_yield_direct
             self.eta       = self.eta_direct

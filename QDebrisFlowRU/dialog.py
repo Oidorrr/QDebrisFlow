@@ -12,6 +12,7 @@ Debris Flow O'Brien — диалог симуляции v1.0
       Всплывающий редактор гидрографа для одного объекта.
 """
 
+import copy
 import json
 import os
 import re
@@ -31,11 +32,11 @@ from qgis.PyQt.QtWidgets import (
 )
 from qgis.PyQt.QtCore import Qt, QThread, pyqtSignal
 from qgis.PyQt.QtGui import QColor, QFont
-from qgis.core import QgsMapLayerProxyModel, QgsWkbTypes, QgsGeometry, QgsPointXY
+from qgis.core import (QgsMapLayerProxyModel, QgsWkbTypes, QgsGeometry, QgsPointXY,
+                       QgsCoordinateTransform, QgsCoordinateReferenceSystem, QgsProject)
 from qgis.gui import QgsMapLayerComboBox
 
 _H_MIN = 0.005   # мин. глубина мокрой ячейки [м] — скрыто от пользователя
-_CFL   = 0.40    # число Куранта — скрыто от пользователя
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -66,6 +67,227 @@ def _lhs_samples(param_ranges: dict, n: int, seed: int = 42) -> list:
                 pt[key] = v
         out.append(pt)
     return out
+
+
+def _spearman(x, y) -> float:
+    """Ранговая корреляция Спирмена (без поправки на связи; значения LHS непрерывны)."""
+    x = np.asarray(x, float); y = np.asarray(y, float)
+    rx = np.argsort(np.argsort(x)).astype(float); ry = np.argsort(np.argsort(y)).astype(float)
+    rx -= rx.mean(); ry -= ry.mean()
+    d = np.sqrt(np.sum(rx * rx) * np.sum(ry * ry))
+    return float(np.sum(rx * ry) / d) if d > 0 else float("nan")
+
+
+def _spearman_ci(x, y, n_boot: int = 1000, seed: int = 0) -> tuple:
+    """95 % бутстреп-интервал корреляции Спирмена."""
+    x = np.asarray(x, float); y = np.asarray(y, float)
+    rng = np.random.default_rng(seed)
+    n = len(x)
+    vals = np.array([_spearman(x[i], y[i]) for i in
+                     (rng.integers(0, n, n) for _ in range(n_boot))])
+    vals = vals[np.isfinite(vals)]
+    if vals.size == 0:
+        return float("nan"), float("nan")
+    return float(np.percentile(vals, 2.5)), float(np.percentile(vals, 97.5))
+
+
+def _volume_residuals(log_v, cm) -> np.ndarray:
+    """Cm без линейного влияния log10(V) (среднее Cm сохраняется) — контроль объёма."""
+    log_v = np.asarray(log_v, float); cm = np.asarray(cm, float)
+    A = np.vstack([log_v, np.ones_like(log_v)]).T
+    coef = np.linalg.lstsq(A, cm, rcond=None)[0]
+    return cm - A @ coef + cm.mean()
+
+
+
+def _plugin_version() -> str:
+    """Версия плагина из metadata.txt (для записи о прогоне)."""
+    import configparser
+    cp = configparser.ConfigParser()
+    try:
+        cp.read(os.path.join(os.path.dirname(os.path.abspath(__file__)), "metadata.txt"),
+                encoding="utf-8")
+        return cp.get("general", "version", fallback="?")
+    except Exception:
+        return "?"
+
+
+def _runtime_info() -> dict:
+    """Версии библиотек, от которых зависит численный результат (для записи о прогоне)."""
+    info = {"plugin_version": _plugin_version(), "numpy": np.__version__}
+    try:
+        import numba
+        info["numba"] = numba.__version__
+    except Exception:
+        info["numba"] = None
+    try:
+        from qgis.core import Qgis
+        info["qgis"] = Qgis.version()
+    except Exception:
+        pass
+    return info
+
+
+def _jsonable(obj):
+    """Параметры → JSON (слои → имя/источник/CRS, numpy → списки; функции и ключи,
+    начинающиеся с "_" (данные только для выполнения), отбрасываются)."""
+    if isinstance(obj, dict):
+        return {str(k): _jsonable(v) for k, v in obj.items()
+                if not callable(v) and not str(k).startswith("_")}
+    if isinstance(obj, (list, tuple, set)):
+        return [_jsonable(v) for v in obj]
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    if isinstance(obj, (np.floating, np.integer, np.bool_)):
+        return obj.item()
+    if isinstance(obj, (str, int, float, bool)) or obj is None:
+        return obj
+    if hasattr(obj, "source") and hasattr(obj, "name") and hasattr(obj, "crs"):
+        return {"name": obj.name(), "source": obj.source(), "crs": obj.crs().authid()}
+    if hasattr(obj, "authid") and hasattr(obj, "toWkt"):      # QgsCoordinateReferenceSystem
+        return obj.authid() or obj.toWkt()
+    return str(obj)
+
+
+def _read_hydrograph_csv(path: str):
+    """Читает (время [с], Q [м³/с]) из CSV/текстового файла: разделитель ',', ';', табуляция
+    или пробелы; с ';', табуляцией и пробелами допускается десятичная запятая; строка
+    заголовка пропускается."""
+    with open(path, encoding="utf-8-sig", errors="replace") as f:
+        lines = [ln.strip() for ln in f if ln.strip()]
+    sample = "\n".join(lines[:20])
+
+    def _comma_splits_numbers():
+        # "," — разделитель, только если делит строку на два числа: в "300 12,5"
+        # это десятичная запятая при разделителе-пробеле
+        for ln in lines[:20]:
+            parts = ln.split(",")
+            try:
+                float(parts[0]); float(parts[1])
+                return True
+            except (ValueError, IndexError):
+                continue
+        return False
+
+    delim = ";" if ";" in sample else ("\t" if "\t" in sample else (
+        "," if "," in sample and _comma_splits_numbers() else None))
+    times, qs = [], []
+    for k, line in enumerate(lines):
+        parts = line.split(delim) if delim else line.split()
+        if delim != ",":
+            parts = [s.strip().replace(",", ".") for s in parts]
+        try:
+            t, q = float(parts[0]), float(parts[1])
+        except (ValueError, IndexError):
+            if not times:              # header line(s)
+                continue
+            raise ValueError(f"строка {k + 1}: ожидались два числа, получено {line!r}")
+        times.append(t); qs.append(q)
+    if len(times) < 2:
+        raise ValueError("меньше двух строк с числами")
+    return times, qs
+
+
+
+def _to_dem_crs(geom, src_crs, dem_crs):
+    """Копия геометрии, перепроецированная из src_crs в CRS ЦМР (если CRS совпадают — без изменений)."""
+    g = QgsGeometry(geom)
+    if src_crs.isValid() and dem_crs.isValid() and src_crs != dem_crs:
+        g.transform(QgsCoordinateTransform(src_crs, dem_crs, QgsProject.instance()))
+    return g
+
+
+def _layer_wkts(layer, dem_crs) -> list:
+    """WKT всех объектов слоя в CRS ЦМР (читается в главном потоке)."""
+    return [_to_dem_crs(f.geometry(), layer.crs(), dem_crs).asWkt()
+            for f in layer.getFeatures() if f.hasGeometry()]
+
+
+def _layer_points(layer, field: str, dem_crs) -> list:
+    """(x, y, глубина) всех точек слоя в CRS ЦМР; MultiPoint разбивается на точки."""
+    out = []
+    for f in layer.getFeatures():
+        if not f.hasGeometry():
+            continue
+        try:
+            d = float(f[field])
+        except (KeyError, TypeError, ValueError):
+            continue
+        g = _to_dem_crs(f.geometry(), layer.crs(), dem_crs)
+        pts = g.asMultiPoint() if g.isMultipart() else [g.asPoint()]
+        out.extend((p.x(), p.y(), d) for p in pts)
+    return out
+
+
+def _feature_wkt(layer, fid, dem_crs) -> str:
+    """WKT одного объекта в CRS ЦМР или '', если объекта/геометрии нет."""
+    f = layer.getFeature(fid)
+    if not f.isValid() or not f.hasGeometry():
+        return ""
+    return _to_dem_crs(f.geometry(), layer.crs(), dem_crs).asWkt()
+
+
+def _check_dem_crs(dem_layer) -> str:
+    """'' если CRS ЦМР пригодна, иначе — сообщение для пользователя."""
+    crs = dem_layer.crs()
+    if crs.isValid() and crs.isGeographic():
+        return (f"ЦМР в географической системе координат ({crs.authid()}): размер ячейки\n"
+                "в градусах, а не в метрах, и расчёт будет бессмысленным.\n"
+                "Перепроецируйте ЦМР в прямоугольную систему в метрах (например, UTM).")
+    if not crs.isValid():
+        return ("У ЦМР не задана система координат: размер ячейки и перепроецирование\n"
+                "векторных слоёв проверить нельзя.\n"
+                "Назначьте правильную прямоугольную систему в метрах (Свойства слоя → Источник).")
+    from qgis.core import QgsUnitTypes
+    if crs.mapUnits() != QgsUnitTypes.DistanceMeters:
+        # солвер считает размер ячейки и глубины в метрах (футы дали бы площадь в 10.76 раза больше)
+        return (f"Единицы CRS ЦМР ({crs.authid()}) — не метры "
+                f"({QgsUnitTypes.toString(crs.mapUnits())}): солвер считает размер ячейки в метрах.\n"
+                "Перепроецируйте ЦМР в прямоугольную систему в метрах (например, UTM).")
+    return ""
+
+
+def _detach_layers(params: dict, dem_layer) -> None:
+    """Главный поток: заменить объекты слоёв QGIS в параметрах воркера их именем/источником/CRS
+    (той же записью, что пишет _jsonable), чтобы рабочий поток не вызывал методы слоя,
+    который могут удалить из проекта во время расчёта.
+    ЦМР, которую GDAL не открывает, читается здесь через провайдер QGIS."""
+    from osgeo import gdal
+    from .qgis_runner import read_dem_array
+    params["dem_crs"] = QgsCoordinateReferenceSystem(dem_layer.crs())
+    gdal.PushErrorHandler("CPLQuietErrorHandler")
+    try:
+        readable = gdal.Open(dem_layer.source()) is not None
+    finally:
+        gdal.PopErrorHandler()
+    if not readable:
+        params["_dem_preloaded"] = read_dem_array(dem_layer)
+    for k, v in list(params.items()):
+        if hasattr(v, "source") and hasattr(v, "name") and hasattr(v, "crs"):
+            params[k] = _jsonable(v)
+
+
+def _read_job_dem(p: dict):
+    """Рабочий поток: ЦМР по пути и CRS, взятым в главном потоке (или прочитанная там заранее)."""
+    from .qgis_runner import read_dem_array
+    if p.get("_dem_preloaded") is not None:
+        return p["_dem_preloaded"]
+    return read_dem_array(None, source=p["dem_layer"]["source"], crs=p["dem_crs"])
+
+
+def _ogr_mem_datasource():
+    """Векторный источник OGR в памяти: драйвер "MEM" (векторный с GDAL 3.11), иначе
+    старый "Memory" (устарел с GDAL 3.11)."""
+    from osgeo import ogr
+    for name in ("MEM", "Memory"):
+        drv = ogr.GetDriverByName(name)
+        try:
+            ds = drv.CreateDataSource("tmp") if drv is not None else None
+        except Exception:
+            ds = None
+        if ds is not None:
+            return ds
+    raise RuntimeError("no in-memory OGR vector driver (MEM / Memory)")
 
 
 
@@ -180,13 +402,11 @@ class HydrographEditorDialog(QDialog):
         if not fname:
             return
         try:
-            data = np.loadtxt(fname, delimiter=",", skiprows=1)
-            if data.ndim == 1:
-                data = data.reshape(-1, 2)
-            self.table.setRowCount(len(data))
-            for i, (t, q) in enumerate(data[:, :2]):
-                self.table.setItem(i, 0, QTableWidgetItem(f"{t:.1f}"))
-                self.table.setItem(i, 1, QTableWidgetItem(f"{q:.3f}"))
+            times, qs = _read_hydrograph_csv(fname)
+            self.table.setRowCount(len(times))
+            for i, (t, q) in enumerate(zip(times, qs)):
+                self.table.setItem(i, 0, QTableWidgetItem(f"{t:.10g}"))
+                self.table.setItem(i, 1, QTableWidgetItem(f"{q:.10g}"))
             self.lbl_csv.setText(os.path.basename(fname))
             self.lbl_csv.setStyleSheet("color:green")
             self.combo_type.setCurrentIndex(1)
@@ -205,8 +425,8 @@ class HydrographEditorDialog(QDialog):
             q_vals = data.get("q_vals", [])
             self.table.setRowCount(max(len(times), 2))
             for i, (t, q) in enumerate(zip(times, q_vals)):
-                self.table.setItem(i, 0, QTableWidgetItem(f"{t:.1f}"))
-                self.table.setItem(i, 1, QTableWidgetItem(f"{q:.3f}"))
+                self.table.setItem(i, 0, QTableWidgetItem(f"{t:.10g}"))
+                self.table.setItem(i, 1, QTableWidgetItem(f"{q:.10g}"))
         self._update_sections()
 
     def _on_ok(self):
@@ -224,21 +444,42 @@ class HydrographEditorDialog(QDialog):
             return {"type": "const", "q_const": q,
                     "times": [0.0, 1e9], "q_vals": [q, q]}
         # Таблица / CSV
-        times, q_vals = [], []
+        import math
+        rows, bad = [], []
         for i in range(self.table.rowCount()):
             ti = self.table.item(i, 0)
             qi = self.table.item(i, 1)
-            if ti is None or qi is None or not ti.text() or not qi.text():
-                continue
+            t_txt = ti.text().strip() if ti is not None else ""
+            q_txt = qi.text().strip() if qi is not None else ""
+            if not t_txt and not q_txt:
+                continue                      # пустая строка
             try:
-                times.append(float(ti.text()))
-                q_vals.append(float(qi.text()))
-            except ValueError:
-                pass
+                t, q = float(t_txt.replace(",", ".")), float(q_txt.replace(",", "."))
+            except ValueError:                # в том числе строка, где заполнена только одна ячейка
+                bad.append(i + 1)
+                continue
+            if not (math.isfinite(t) and math.isfinite(q)):
+                bad.append(i + 1)             # nan / inf
+                continue
+            rows.append((t, q))
+        if bad:
+            raise ValueError(f"Строки {bad}: не конечное число или неполная строка "
+                             "(цифры в обеих ячейках, например 12.5 или 12,5).")
+        if any(q < 0 for _, q in rows):
+            raise ValueError("Расход Q не может быть отрицательным.")
+        if any(t < 0 for t, _ in rows):
+            raise ValueError("Время не может быть отрицательным.")
+        rows.sort(key=lambda r: r[0])          # np.interp needs increasing times
+        times = [r[0] for r in rows]
+        q_vals = [r[1] for r in rows]
+        if any(b <= a for a, b in zip(times, times[1:])):
+            raise ValueError("В двух строках одинаковое время — времена должны различаться.")
         if len(times) < 2:
             raise ValueError(
                 "Нужно минимум 2 строки с числами.\n"
                 "Пример: (0, 0) и (300, 100).")
+        if not any(q > 0 for q in q_vals):
+            raise ValueError("Расход Q равен нулю во всех строках: у гидрографа нет объёма.")
         return {"type": "table", "times": times, "q_vals": q_vals,
                 "q_const": 0.0}
 
@@ -255,39 +496,38 @@ class SimulationWorker(QThread):
     log_message = pyqtSignal(str)
     finished    = pyqtSignal(object)
     error       = pyqtSignal(str)
+    cancelled   = pyqtSignal()
 
     def __init__(self, params: dict):
         super().__init__()
         self.params = params
+        self._cancelled = False
+
+    def cancel(self):
+        self._cancelled = True
 
     # ── Главный метод потока ──────────────────────────────────────────────────
 
     def run(self):
         try:
-            import sys
-            plugin_dir = os.path.dirname(os.path.abspath(__file__))
-            if plugin_dir not in sys.path:
-                sys.path.insert(0, plugin_dir)
-
-            from core.rheology import OBrienParameters
-            from core.solver   import (TerrainGrid, SimulationConfig,
+            # относительные импорты: верхнеуровневый `core` другого плагина (или другой
+            # языковой копии), загруженный раньше, не должен подменить наш
+            from .core.rheology import OBrienParameters
+            from .core.solver   import (TerrainGrid, SimulationConfig,
                                         SourceCondition, InflowSource,
-                                        DebrisFlowSolver2D)
-            from qgis_runner   import read_dem_array, write_geotiff
+                                        DebrisFlowSolver2D, hydrograph_volume)
+            from .qgis_runner   import write_geotiff
 
             p = self.params
 
             # ── DEM ───────────────────────────────────────────────────────────
+            # слои заменены именем/источником/CRS в главном потоке (_detach_layers)
             self.log_message.emit("Чтение DEM...")
-            dem, geo_info = read_dem_array(p["dem_layer"])
+            dem, geo_info = _read_job_dem(p)
 
-            # ── CRS check ─────────────────────────────────────────────────────
-            src_layer = p["source_layer"]
-            if p["dem_layer"].crs() != src_layer.crs():
-                self.log_message.emit(
-                    f"⚠ CRS не совпадают: DEM={p['dem_layer'].crs().authid()}, "
-                    f"линии={src_layer.crs().authid()}. "
-                    "Перепроецируйте линейный слой в CRS DEM.")
+            # ── CRS check (сравнение сделано в главном потоке) ────────────────
+            if p.get("_crs_note"):
+                self.log_message.emit(p["_crs_note"])
 
             # ── Растеризация по объектам → InflowSource на каждый ────────────
             # p["sources"] = list of {fid, name, times, q_vals}
@@ -297,23 +537,37 @@ class SimulationWorker(QThread):
                 name = src_info["name"]
                 self.log_message.emit(f"  Растеризация: {name} (ID={fid})...")
 
-                feat = next(
-                    (f for f in src_layer.getFeatures() if f.id() == fid),
-                    None)
-                if feat is None or not feat.geometry():
+                wkt = src_info.get("wkt")
+                if not wkt:
                     self.log_message.emit(f"    ⚠ Объект ID={fid} не найден, пропуск.")
                     continue
 
-                rows, cols = self._rasterise_feature(feat, geo_info)
+                rows, cols = self._rasterise_feature(wkt, geo_info)
                 if len(rows) == 0:
                     self.log_message.emit(
                         f"    ⚠ Объект ID={fid} не пересекает DEM, пропуск.")
                     continue
+                # то же правило, что TerrainGrid.mask_valid: солвер отбрасывает ячейки nodata
+                _z = dem[rows, cols]
+                n_valid = int(np.sum((_z != geo_info["nodata"]) & np.isfinite(_z)))
+                if n_valid == 0:
+                    self.log_message.emit(
+                        f"    ⚠ Объект ID={fid} целиком лежит на ячейках nodata ЦМР, пропуск.")
+                    continue
+                if n_valid < len(rows):
+                    self.log_message.emit(
+                        f"    ⚠ {len(rows) - n_valid} из {len(rows)} ячеек — nodata ЦМР; "
+                        "приток распределяется по остальным ячейкам.")
 
                 self.log_message.emit(
                     f"    ✓ {len(rows)} ячеек, "
                     f"Q_max={max(src_info['q_vals']):.1f} м³/с")
 
+                if max(src_info["times"]) < 1e8:      # not a constant hydrograph
+                    _beyond = hydrograph_volume(src_info["times"], src_info["q_vals"],
+                                                p["t_end"], 1e12)
+                    if _beyond > 0:
+                        self.log_message.emit(f"    ⚠ {_beyond:.0f} м³ этого гидрографа приходятся на время после t_end и не будут введены.")
                 inflow_sources.append(InflowSource(
                     rows    = rows,
                     cols    = cols,
@@ -324,7 +578,7 @@ class SimulationWorker(QThread):
 
             if not inflow_sources:
                 raise RuntimeError(
-                    "Ни один объект источника не пересекает DEM.\n"
+                    "Ни один объект источника не пересекает действительные (не nodata) ячейки DEM.\n"
                     "Проверьте CRS и экстент линейного слоя.")
 
             source = SourceCondition.from_sources(inflow_sources)
@@ -339,6 +593,7 @@ class SimulationWorker(QThread):
                 rho_sediment     = p.get("rho_s", 2650.0),
                 rho_water        = p.get("rho_w", 1000.0),
                 tau_yield_direct = p.get("tau_yield_direct", 0.0),
+                direct_mode      = p.get("direct_mode"),
                 eta_direct       = p.get("eta_direct",       0.0),
                 alpha1           = p["alpha1"],
                 beta1            = p["beta1"],
@@ -361,6 +616,10 @@ class SimulationWorker(QThread):
                 t_end             = p["t_end"],
                 dt_max            = p["dt_max"],
                 cfl_number        = p.get("cfl_number", 0.60),
+                face_depth_limiter = p.get("face_depth_limiter", True),
+                theta             = p.get("theta", 1.0),
+                arrival_depth     = p.get("arrival_depth"),
+                cancel_check      = lambda: self._cancelled,
                 progress_callback = lambda tc, te: (
                     self.progress.emit(tc, te),
                     self.log_message.emit(f"  t = {tc:.0f} с / {te:.0f} с")
@@ -379,6 +638,13 @@ class SimulationWorker(QThread):
             # Применяем порог глубины если задан
             h_thr = p.get("h_threshold", 0.0)
 
+            def _mask_by_depth(arr):
+                if h_thr <= 0.0:
+                    return arr
+                out = arr.copy()
+                out[result.h_max < h_thr] = -9999.0
+                return out
+
             def _thr(arr):
                 if h_thr <= 0.0:
                     return arr
@@ -389,7 +655,9 @@ class SimulationWorker(QThread):
             # Полная карта: ключ → (массив, zero_as_nodata)
             all_outputs = {
                 "h_max":     (_thr(result.h_max),   True),
-                "V_max":     (result.V_max,          True),
+                "V_max":     (_mask_by_depth(result.V_max),   True),
+                "HV2_max":   (_mask_by_depth(result.HV2_max), True),
+                "Fr_hv2":    (_mask_by_depth(result.Fr_hv2),  True),
                 "h_final":   (_thr(result.h_final),  True),
                 "t_arrival": (np.where(np.isinf(result.t_arrival),
                                        -9999.0, result.t_arrival), False),
@@ -405,15 +673,66 @@ class SimulationWorker(QThread):
                 paths[name] = path
                 self.log_message.emit(f"  Сохранён: {path}")
 
+            _w01 = result.h_max >= 0.1
+            _nw = max(int(_w01.sum()), 1)
+            fr05 = 100.0 * float(np.sum(result.Fr_hv2[_w01] > 0.5)) / _nw
+            fr1 = 100.0 * float(np.sum(result.Fr_hv2[_w01] > 1.0)) / _nw
             vb = result.volume_balance()
             self.log_message.emit(
                 f"\n── Итоги ──\n"
                 f"  h_max пик:  {result.h_max.max():.3f} м\n"
                 f"  V_max пик:  {result.V_max.max():.3f} м/с\n"
+                f"  h·v² пик:   {result.HV2_max.max():.3f} м³/с² "
+                f"(h_max·V_max² дало бы {float(np.max(result.h_max * result.V_max**2)):.3f})\n"
+                f"  Fr при пике h·v²: > 0.5 на {fr05:.1f} %, > 1 на {fr1:.1f} % площади с h_max ≥ 0.1 м\n"
+                f"              (там LIA вне области применимости, de Almeida & Bates 2013)\n"
                 f"  Шагов:      {result.n_steps}\n"
                 f"  Время сим.: {result.t_simulated:.1f} с\n"
+                f"  Введено:    {result.total_inflow_vol:.1f} м³\n"
                 f"  Δ масса:    {vb.get('V_loss_pct', float('nan')):.3f}%"
             )
+            if result.edge_h_max >= _H_MIN:
+                self.log_message.emit(
+                    f"\n⚠ Поток дошёл до границы домена (h_max на краю = "
+                    f"{result.edge_h_max:.3f} м).\n"
+                    "  Граница — непроницаемая стенка: жидкость накапливается у неё, а не\n"
+                    "  уходит, поэтому h_max/h_final у края завышены.\n"
+                    "  Ячейки nodata внутри ЦМР — тоже стенки и тоже вызывают это предупреждение.\n"
+                    "  Расширьте ЦМР за пределы ожидаемой зоны выноса (или заполните дыры nodata).")
+            if result.n_vcap_cells:
+                self.log_message.emit(
+                    f"\n⚠ Скорость упёрлась в предел 30 м/с в {result.n_vcap_cells} ячейках.\n"
+                    "  Это численный артефакт (колебания LIA в крутом русле или ячейки,\n"
+                    "  опустошённые за один шаг); V_max и h·v² там ненадёжны.\n"
+                    "  Попробуйте θ-взвешивание 0.8–0.9 на вкладке «Настройки решателя».")
+
+            rec_path = os.path.join(out_dir, f"{prefix}_run.json")
+            from .core import solver as _solver_mod
+            run_rec = dict(
+                created=time.strftime("%Y-%m-%d %H:%M:%S"),
+                runtime=dict(_runtime_info(), backend=(
+                    "Numba JIT" if _solver_mod._NUMBA_AVAILABLE else "NumPy")),
+                parameters=_jsonable(p),
+                rheology=dict(mode=obrien.mode_name, tau_yield_Pa=float(obrien.tau_yield),
+                              eta_Pas=float(obrien.eta), rho_mixture=float(obrien.rho_mixture),
+                              h_min=float(obrien.h_min)),
+                dem=dict(nx=int(geo_info["nx"]), ny=int(geo_info["ny"]), dx=float(geo_info["dx"]),
+                         dy=float(geo_info["dy"]), crs=p["dem_layer"]["crs"],
+                         source=p["dem_layer"]["source"]),
+                results=dict(n_steps=int(result.n_steps), t_simulated=float(result.t_simulated),
+                             inflow_vol_m3=float(result.total_inflow_vol),
+                             volume_balance=_jsonable(vb),
+                             h_max_peak_m=float(result.h_max.max()),
+                             V_max_peak_ms=float(result.V_max.max()),
+                             HV2_max_peak=float(result.HV2_max.max()),
+                             Fr_hv2_gt05_pct=fr05, Fr_hv2_gt1_pct=fr1,
+                             edge_h_max_m=float(result.edge_h_max),
+                             vcap_cells=int(result.n_vcap_cells)),
+                outputs=paths,
+            )
+            with open(rec_path, "w", encoding="utf-8") as f:
+                json.dump(run_rec, f, ensure_ascii=False, indent=2)
+            self.log_message.emit(f"  Запись о прогоне (все параметры, версии, баланс): {rec_path}")
 
             self.finished.emit({
                 "result":   result,
@@ -424,11 +743,15 @@ class SimulationWorker(QThread):
             })
 
         except Exception as e:
+            if type(e).__name__ == "SimulationCancelled":
+                self.log_message.emit("\n⚠ Расчёт остановлен пользователем.")
+                self.cancelled.emit()
+                return
             self.error.emit(f"{type(e).__name__}: {e}\n\n{traceback.format_exc()}")
 
     # ── Растеризация одного объекта ───────────────────────────────────────────
 
-    def _rasterise_feature(self, feature, geo_info: dict):
+    def _rasterise_feature(self, wkt: str, geo_info: dict):
         """
         Растеризует один объект (линию) → (rows_array, cols_array).
         Использует GDAL через OGR с in-memory слоем, без записи на диск.
@@ -442,8 +765,7 @@ class SimulationWorker(QThread):
             crs    = geo_info.get("crs")
 
             # In-memory vector dataset с одним объектом
-            mem_vec_drv = ogr.GetDriverByName("Memory")
-            vec_ds      = mem_vec_drv.CreateDataSource("tmp")
+            vec_ds      = _ogr_mem_datasource()
 
             srs = None
             if crs:
@@ -459,7 +781,6 @@ class SimulationWorker(QThread):
             lyr.CreateField(fld)
 
             ogr_feat = ogr.Feature(lyr.GetLayerDefn())
-            wkt = feature.geometry().asWkt()
             ogr_feat.SetGeometry(ogr.CreateGeometryFromWkt(wkt))
             ogr_feat.SetField("fid", 1)
             lyr.CreateFeature(ogr_feat)
@@ -476,13 +797,15 @@ class SimulationWorker(QThread):
             ras_ds = vec_ds = None
             return np.where(mask)
 
-        except Exception:
+        except Exception as e:
+            self.log_message.emit(
+                f"    ⚠ Растеризация линии через GDAL не удалась ({e}) — запасной путь QGIS (медленнее, след шире).")
             # Fallback: QGIS distance-based
             dx, dy   = geo_info["dx"], geo_info["dy"]
             xmin     = geo_info["xmin"]
             ymax     = geo_info["ymax"]
             nx, ny   = geo_info["nx"], geo_info["ny"]
-            geom     = feature.geometry()
+            geom     = QgsGeometry.fromWkt(wkt)
             thresh   = (dx**2 + dy**2)**0.5 * 0.5
             mask     = np.zeros((ny, nx), dtype=bool)
             for row in range(ny):
@@ -501,9 +824,9 @@ class SimulationWorker(QThread):
 
 class SweepWorker(QThread):
     """
-    Последовательный LHS-sweep в фоновом QThread.
-    Параллельный mp.Pool несовместим с Qt-event-loop QGIS,
-    поэтому прогоны идут один за другим, но UI не блокируется.
+    LHS-sweep в фоновом QThread: при 1 потоке прогоны идут один за другим,
+    при > 1 — в ThreadPoolExecutor (mp.Pool несовместим с Qt-event-loop QGIS
+    и не используется); UI не блокируется.
     Сигналы:
         run_done(dict)    — результат одного прогона
         sweep_log(str)    — текстовое сообщение
@@ -529,32 +852,44 @@ class SweepWorker(QThread):
     def run(self):
         import sys, time
         plugin_dir = os.path.dirname(os.path.abspath(__file__))
-        if plugin_dir not in sys.path:
-            sys.path.insert(0, plugin_dir)
 
-        # Импортируем sweep_runner ПОСЛЕ добавления plugin_dir в sys.path
-        from core import sweep_runner as _sr
+        # относительные импорты (см. SimulationWorker.run)
+        from .core import sweep_runner as _sr
+        from .core.solver import hydrograph_volume as _hydro_volume
 
+        _csv_f = None
         try:
-            from qgis_runner import read_dem_array
-
             p = self.params
 
             # ── DEM и растеризация источников ─────────────────────────────────
+            # слои заменены именем/источником/CRS в главном потоке (_detach_layers)
             self.sweep_log.emit("Чтение DEM...")
-            dem, geo_info = read_dem_array(p["dem_layer"])
+            dem, geo_info = _read_job_dem(p)
 
             self.sweep_log.emit("Растеризация источников...")
             src_cells = []
             for src_info in p["sources"]:
-                feat = next(
-                    (f for f in p["source_layer"].getFeatures()
-                     if f.id() == src_info["fid"]), None)
-                if feat is None:
+                wkt = src_info.get("wkt")
+                if not wkt:
+                    self.sweep_log.emit(f"⚠ Источник {src_info['name']} не найден, пропуск.")
                     continue
-                rows, cols = self._rasterise_feature(feat, geo_info)
+                rows, cols = self._rasterise_feature(wkt, geo_info)
                 if len(rows) == 0:
+                    self.sweep_log.emit(
+                        f"⚠ Источник {src_info['name']} не пересекает DEM, пропуск.")
                     continue
+                # источник целиком на nodata солвер отбрасывает: не включать его и в
+                # базовый объём (то же правило, что TerrainGrid.mask_valid)
+                _z = dem[rows, cols]
+                n_valid = int(np.sum((_z != geo_info["nodata"]) & np.isfinite(_z)))
+                if n_valid == 0:
+                    self.sweep_log.emit(
+                        f"⚠ Источник {src_info['name']} целиком лежит на ячейках nodata ЦМР, пропуск.")
+                    continue
+                if n_valid < len(rows):
+                    self.sweep_log.emit(
+                        f"⚠ Источник {src_info['name']}: {len(rows) - n_valid} из {len(rows)} ячеек — "
+                        "nodata ЦМР; приток распределяется по остальным ячейкам.")
                 src_cells.append({
                     "rows":        rows,
                     "cols":        cols,
@@ -564,35 +899,49 @@ class SweepWorker(QThread):
                 })
 
             if not src_cells:
-                self.sweep_error.emit("Ни один источник не пересекает DEM.")
+                self.sweep_error.emit("Ни один источник не пересекает действительные (не nodata) ячейки DEM.")
                 return
 
             # Базовый объём
             base_vol = 0.0
             for sc in src_cells:
-                t, q = sc["times"], sc["base_q_vals"]
-                finite = t < 1e8
-                if finite.sum() >= 2:
-                    _trapz = getattr(np, "trapezoid", None) or np.trapz
-                    base_vol += float(_trapz(q[finite], t[finite]))
-            if base_vol <= 0:
+                if float(np.max(sc["times"])) < 1e8:
+                    _beyond = _hydro_volume(sc["times"], sc["base_q_vals"],
+                                            float(p["t_end"]), 1e12)
+                    if _beyond > 0:
+                        self.sweep_log.emit(f"⚠ Источник {sc['name']}: {_beyond:.0f} м³ после t_end не вводятся.")
+                # объём, реально вводимый на [0, t_end] (в т.ч. для постоянного Q)
+                base_vol += _hydro_volume(sc["times"], sc["base_q_vals"],
+                                          0.0, float(p["t_end"]))
+            if not (base_vol > 0):          # NaN тоже отклоняется
                 self.sweep_error.emit(
                     "Базовый объём = 0. Проверьте гидрографы источников.")
                 return
             self.sweep_log.emit(
-                f"Базовый объём: {base_vol:.0f} м³ "
+                f"Базовый объём на [0, t_end]: {base_vol:.0f} м³ "
                 f"({len(src_cells)} источников)")
 
             # ── Наблюдаемая инундация ─────────────────────────────────────────
             self.sweep_log.emit("Растеризация полигона инундации...")
-            obs_mask = self._rasterize_polygon(p["obs_poly_layer"], geo_info)
+            obs_mask = self._rasterize_polygon(p["obs_poly_wkts"], geo_info)
             self.sweep_log.emit(f"Наблюдаемая инундация: {obs_mask.sum()} ячеек")
 
             # ── Точки глубин ──────────────────────────────────────────────────
             self.sweep_log.emit("Чтение точек глубин...")
+            n_nonfinite = sum(1 for _x, _y, _d in p["obs_pts"] if not np.isfinite(_d))
+            if n_nonfinite:
+                self.sweep_log.emit(
+                    f"⚠ Пропущено точек с нечисловой глубиной (NaN/inf): {n_nonfinite}.")
             obs_rows, obs_cols, obs_depths = self._extract_depth_points(
-                p["obs_pts_layer"], p["depth_field"], geo_info)
+                p["obs_pts"], geo_info)
             self.sweep_log.emit(f"Точек замеров в домене: {len(obs_depths)}")
+            n_outside = len(p["obs_pts"]) - n_nonfinite - len(obs_depths)
+            if n_outside:
+                self.sweep_log.emit(f"⚠ Пропущено точек глубины вне ЦМР: {n_outside}.")
+            if len(obs_depths) == 0:
+                self.sweep_log.emit(
+                    "⚠ Нет годных точек глубины: Cm = ΩTm, глубины не учитываются\n"
+                    "  (проверьте поле глубины: пустые, нечисловые значения и «0,7» пропускаются).")
 
             # ── LHS выборка ───────────────────────────────────────────────────
             n_runs    = p["n_runs"]
@@ -615,7 +964,9 @@ class SweepWorker(QThread):
                 dy           = float(geo_info["dy"]),
                 xmin         = float(geo_info.get("xmin", 0.0)),
                 ymax         = float(geo_info.get("ymax", 0.0)),
-                nodata       = float(geo_info.get("nodata") or -9999.0),
+                # read_dem_array уже подставляет -9999 при отсутствии nodata;
+                # без `or`: nodata = 0 должно остаться 0, как в одиночном расчёте
+                nodata       = float(geo_info["nodata"]),
                 # Явное приведение каждого элемента → чистые Python float
                 geotransform = tuple(float(x) for x in _gt),
                 # crs НЕ включается — QgsCoordinateReferenceSystem не picklable
@@ -623,6 +974,7 @@ class SweepWorker(QThread):
 
             job_base = dict(
                 plugin_dir      = plugin_dir,
+                cancel_check    = (lambda: self._cancelled),
                 dem             = dem,
                 geo_info        = _geo_serial,   # только примитивы → picklable
                 src_cells       = src_cells,
@@ -639,6 +991,8 @@ class SweepWorker(QThread):
                 t_end           = p["t_end"],
                 dt_max          = p["dt_max"],
                 cfl_number      = p.get("cfl_number", 0.60),
+                face_depth_limiter = p.get("face_depth_limiter", True),
+                theta           = p.get("theta", 1.0),
                 depth_threshold = p["depth_threshold"],
             )
 
@@ -649,6 +1003,25 @@ class SweepWorker(QThread):
             ]
 
             # Проверка не нужна: потоки не требуют pickle
+            import csv as _csv
+            os.makedirs(p["out_dir"], exist_ok=True)
+            csv_path = os.path.join(p["out_dir"], p["csv_name"])
+            _csv_f = open(csv_path, "w", newline="", encoding="utf-8")
+            _csv_w = _csv.DictWriter(_csv_f, fieldnames=["run_id", "status", "vol_m3", "vol_in_m3", "tau_yield_Pa", "eta_Pas", "manning_n",
+                       "K_visc", "h_max_m", "edge_h_max_m", "vcap_cells", "wall_s", "TP", "FP",
+                       "FN", "omega_Tm", "delta_o_c", "delta_u", "Cm", "depth_bias_m", "eta_remaining_min"],
+                                     extrasaction="ignore", restval="")
+            _csv_w.writeheader(); _csv_f.flush()
+            from .core import solver as _solver_mod
+            ctx = dict(created=time.strftime("%Y-%m-%d %H:%M:%S"),
+                       runtime=dict(_runtime_info(), backend=(
+                           "Numba JIT" if _solver_mod._NUMBA_AVAILABLE else "NumPy")),
+                       csv=csv_path, note="ключи с префиксом log_ выбираются равномерно по log10 и содержат значения log10",
+                       base_volume_m3=base_vol, parameters=_jsonable(p))
+            with open(os.path.splitext(csv_path)[0] + "_context.json", "w",
+                      encoding="utf-8") as f:
+                json.dump(ctx, f, ensure_ascii=False, indent=2)
+            self.sweep_log.emit(f"Результаты дописываются в {csv_path} после каждого прогона")
             t_start   = time.time()
             _best_Cm  = float("inf")
             _best_pkg = None
@@ -662,7 +1035,8 @@ class SweepWorker(QThread):
                 eta_min   = round(
                     (time.time() - t_start) / max(completed, 1)
                     * (n_runs - completed) / 60, 1)
-                row_data["eta_min"] = eta_min
+                row_data["eta_remaining_min"] = eta_min   # оставшееся время [мин], а не η
+                _csv_w.writerow(row_data); _csv_f.flush()
 
                 self.run_done.emit(row_data)
 
@@ -686,6 +1060,9 @@ class SweepWorker(QThread):
                 if cm_v is not None and h_max_arr is not None and cm_v < _best_Cm:
                     _best_Cm  = cm_v
                     _best_pkg = dict(
+                        run_id   = row_data["run_id"],
+                        sample   = dict(samples[row_data["run_id"]]),
+                        base_vol = base_vol,
                         h_max    = h_max_arr.copy(),
                         geo_info = geo_info,
                         params   = dict(
@@ -742,8 +1119,8 @@ class SweepWorker(QThread):
                                 run_id=rid, status=f"error: {exc}",
                                 h_max=None,
                                 **{k: None for k in [
-                                    "vol_m3","tau_yield_Pa","eta_Pas","manning_n",
-                                    "K_visc","h_max_m","wall_s","eta_min",
+                                    "vol_m3","vol_in_m3","tau_yield_Pa","eta_Pas","manning_n",
+                                    "K_visc","h_max_m","edge_h_max_m","vcap_cells","wall_s","eta_remaining_min",
                                     "TP","FP","FN","omega_Tm",
                                     "delta_o_c","delta_u","Cm","depth_bias_m"]},
                             )
@@ -757,17 +1134,20 @@ class SweepWorker(QThread):
         except Exception as e:
             self.sweep_error.emit(
                 f"{type(e).__name__}: {e}\n\n{traceback.format_exc()}")
+        finally:
+            if _csv_f is not None:
+                _csv_f.close()
 
     # ── Вспомогательные методы ────────────────────────────────────────────────
 
-    def _rasterise_feature(self, feature, geo_info):
+    def _rasterise_feature(self, wkt, geo_info):
         """Та же растеризация что и в SimulationWorker."""
         try:
             from osgeo import gdal, ogr, osr
             nx, ny = geo_info["nx"], geo_info["ny"]
             gt     = geo_info["geotransform"]
             crs    = geo_info.get("crs")
-            mem_vec = ogr.GetDriverByName("Memory").CreateDataSource("tmp")
+            mem_vec = _ogr_mem_datasource()
             srs = None
             if crs:
                 srs = osr.SpatialReference()
@@ -780,7 +1160,7 @@ class SweepWorker(QThread):
             lyr.CreateField(ogr.FieldDefn("fid", ogr.OFTInteger))
             ogr_feat = ogr.Feature(lyr.GetLayerDefn())
             ogr_feat.SetGeometry(
-                ogr.CreateGeometryFromWkt(feature.geometry().asWkt()))
+                ogr.CreateGeometryFromWkt(wkt))
             ogr_feat.SetField("fid", 1)
             lyr.CreateFeature(ogr_feat)
             ras_ds = gdal.GetDriverByName("MEM").Create(
@@ -791,11 +1171,13 @@ class SweepWorker(QThread):
             mask = ras_ds.GetRasterBand(1).ReadAsArray().astype(bool)
             ras_ds = mem_vec = None
             return np.where(mask)
-        except Exception:
+        except Exception as e:
+            self.sweep_log.emit(
+                f"  ⚠ Растеризация линии через GDAL не удалась ({e}) — запасной путь QGIS (медленнее, след шире).")
             dx, dy = geo_info["dx"], geo_info["dy"]
             xmin, ymax = geo_info["xmin"], geo_info["ymax"]
             nx, ny = geo_info["nx"], geo_info["ny"]
-            geom   = feature.geometry()
+            geom   = QgsGeometry.fromWkt(wkt)
             thresh = (dx**2 + dy**2)**0.5 * 0.5
             mask   = np.zeros((ny, nx), dtype=bool)
             for row in range(ny):
@@ -807,7 +1189,7 @@ class SweepWorker(QThread):
                         mask[row, col] = True
             return np.where(mask)
 
-    def _rasterize_polygon(self, poly_layer, geo_info) -> np.ndarray:
+    def _rasterize_polygon(self, wkts, geo_info) -> np.ndarray:
         """
         Растеризует полигональный слой инундации → bool-маска (ny, nx).
         Значение 1 = наблюдалась инундация.
@@ -818,7 +1200,7 @@ class SweepWorker(QThread):
             gt     = geo_info["geotransform"]
             crs    = geo_info.get("crs")
 
-            mem_vec = ogr.GetDriverByName("Memory").CreateDataSource("tmp")
+            mem_vec = _ogr_mem_datasource()
             srs = None
             if crs:
                 srs = osr.SpatialReference()
@@ -831,12 +1213,9 @@ class SweepWorker(QThread):
                                       geom_type=ogr.wkbPolygon)
             lyr.CreateField(ogr.FieldDefn("val", ogr.OFTInteger))
 
-            for feat in poly_layer.getFeatures():
-                if feat.geometry() is None:
-                    continue
+            for wkt in wkts:
                 ogr_feat = ogr.Feature(lyr.GetLayerDefn())
-                ogr_feat.SetGeometry(
-                    ogr.CreateGeometryFromWkt(feat.geometry().asWkt()))
+                ogr_feat.SetGeometry(ogr.CreateGeometryFromWkt(wkt))
                 ogr_feat.SetField("val", 1)
                 lyr.CreateFeature(ogr_feat)
 
@@ -853,13 +1232,12 @@ class SweepWorker(QThread):
         except Exception as e:
             # Fallback через QGIS geometry (медленно)
             self.sweep_log.emit(
-                f"  ⚠ GDAL polygon rasterize failed: {e} — fallback QGIS")
+                f"  ⚠ Растеризация полигона через GDAL не удалась: {e} — запасной путь QGIS")
             nx, ny = geo_info["nx"], geo_info["ny"]
             dx, dy = geo_info["dx"], geo_info["dy"]
             xmin, ymax = geo_info["xmin"], geo_info["ymax"]
             mask = np.zeros((ny, nx), dtype=bool)
-            polys = [f.geometry() for f in poly_layer.getFeatures()
-                     if f.geometry() is not None]
+            polys = [QgsGeometry.fromWkt(w) for w in wkts]
             for row in range(ny):
                 cy = ymax - (row + 0.5) * dy
                 for col in range(nx):
@@ -869,10 +1247,9 @@ class SweepWorker(QThread):
                         mask[row, col] = True
             return mask
 
-    def _extract_depth_points(self, pts_layer, depth_field: str,
-                               geo_info: dict):
+    def _extract_depth_points(self, pts, geo_info: dict):
         """
-        Извлекает точки наблюдаемых глубин из point SHP.
+        Привязывает точки наблюдённых глубин [(x, y, глубина) в CRS ЦМР] к ячейкам сетки.
         Возвращает (row_arr, col_arr, depth_arr) — только точки в домене.
         """
         gt   = geo_info["geotransform"]
@@ -884,18 +1261,14 @@ class SweepWorker(QThread):
         nx   = geo_info["nx"]
 
         rows, cols, depths = [], [], []
-        for feat in pts_layer.getFeatures():
-            geom = feat.geometry()
-            if geom is None:
+        for x, y, d in pts:
+            # глубина NaN/inf дала бы Σ|d_obs| = NaN и обнулила Δo,c и Δu во всех прогонах
+            if not np.isfinite(d):
                 continue
-            pt = geom.asPoint()
-            col = int((pt.x() - xmin) / dx)
-            row = int((ymax - pt.y()) / dy)
+            # floor (а не int): точки левее/выше сетки отбрасываются
+            col = int(np.floor((x - xmin) / dx))
+            row = int(np.floor((ymax - y) / dy))
             if 0 <= row < ny and 0 <= col < nx:
-                try:
-                    d = float(feat[depth_field])
-                except (KeyError, TypeError, ValueError):
-                    continue
                 rows.append(row)
                 cols.append(col)
                 depths.append(d)
@@ -909,13 +1282,25 @@ class SweepWorker(QThread):
 # Главный диалог
 # ─────────────────────────────────────────────────────────────────────────────
 
+class _RunPanel:
+    """Виджеты вкладки «Анализ множественных прогонов», повторяющие одиночный
+    прогон: подвкладки 1, 3, 4 и Cv, Cv_max, ρs, ρw подвкладки 2. Имена атрибутов
+    те же, что у DebrisFlowDialog, где лежат виджеты одиночного прогона."""
+
+    def __init__(self):
+        self._hydro_data     = {}
+        self._hydro_layer_id = None
+
+
 class DebrisFlowDialog(QDialog):
     """
-    Диалог симуляции с четырьмя вкладками:
-      1. Слои и источники   — DEM, линейный слой, таблица источников
-      2. O'Brien Parameters — реология
-      3. Solver Settings    — временные параметры
-      4. Выходные данные    — папка, prefix, выбор слоёв
+    Диалог симуляции с двумя вкладками верхнего уровня.
+    «Одиночный прогон»: 1. Слои и источники, 2. Параметры O'Brien (реология),
+      3. Настройки решателя, 4. Выходные данные (+ кнопки запуска).
+    «Анализ множественных прогонов (LHS-анализ)»: 1. Слои и источники, 2. O'Brien
+      (Cv, плотности), 3. Настройки LHS (файл настроек, наблюдения, диапазоны,
+      настройки анализа), 4. Настройки решателя, 5. Выходные данные (+ кнопки запуска).
+    Индикатор прогресса и журнал внизу окна — общие для обеих вкладок.
     """
 
     def __init__(self, iface):
@@ -924,9 +1309,14 @@ class DebrisFlowDialog(QDialog):
         self.worker = None
         # Хранилище гидрографов: {feature_id (int): dict}
         self._hydro_data     = {}
+        # id линейного слоя, к которому относятся гидрографы (fid уникален лишь в слое)
+        self._hydro_layer_id = None
         self.sweep_worker    = None
+        self.sweep_best_worker = None
         self._sweep_results  = []
         self._sweep_best_pkg = None
+        # виджеты вкладки «Анализ множественных прогонов» (подвкладки 1, 3, 4 и Cv/ρ из 2)
+        self.lhs = _RunPanel()
         self.setWindowTitle(
             "Моделирование селевых потоков — O'Brien Quadratic  (v1.0)")
         self.setMinimumWidth(660)
@@ -938,12 +1328,33 @@ class DebrisFlowDialog(QDialog):
     def _build_ui(self):
         main = QVBoxLayout(self)
 
+        # две вкладки верхнего уровня; подвкладки 1, 2, решателя и вывода есть в обеих, у каждой
+        # вкладки свои виджеты («3. Настройки LHS» — только в анализе прогонов);
+        # виджеты: одиночный прогон — в самом диалоге, анализ прогонов — в self.lhs
+        self.tabs_single = QTabWidget()
+        self.tabs_single.addTab(self._with_apply(self._tab_sources(self), 1, self, self.lhs),
+                "1. Слои и источники")
+        self.tabs_single.addTab(self._with_apply(self._tab_rheology(), 2, self, self.lhs),
+                "2. Параметры O'Brien")
+        self.tabs_single.addTab(self._with_apply(self._tab_solver(self), 3, self, self.lhs),
+                "3. Настройки решателя")
+        out_single = self._with_apply(self._tab_output(self), 4, self, self.lhs)
+        self.tabs_single.addTab(out_single,
+                "4. Выходные данные")
+        self.tabs_lhs = QTabWidget()
+        self.tabs_lhs.addTab(self._with_apply(self._tab_sources(self.lhs), 1, self.lhs, self),
+                "1. Слои и источники")
+        self.tabs_lhs.addTab(self._with_apply(self._tab_lhs_rheology(), 2, self.lhs, self),
+                "2. O'Brien")
+        self.tabs_lhs.addTab(self._tab_sweep(), "3. Настройки LHS")
+        self.tabs_lhs.addTab(self._with_apply(self._tab_solver(self.lhs), 3, self.lhs, self),
+                "4. Настройки решателя")
+        out_lhs = self._with_apply(self._tab_output(self.lhs), 4, self.lhs, self)
+        self.tabs_lhs.addTab(out_lhs,
+                "5. Выходные данные")
         self.tabs = QTabWidget()
-        self.tabs.addTab(self._tab_sources(),   "1. Слои и источники")
-        self.tabs.addTab(self._tab_rheology(),  "2. Параметры O'Brien")
-        self.tabs.addTab(self._tab_solver(),    "3. Настройки решателя")
-        self.tabs.addTab(self._tab_output(),    "4. Выходные данные")
-        self.tabs.addTab(self._tab_sweep(),     "5. LHS-анализ")
+        self.tabs.addTab(self.tabs_single, "Одиночный прогон")
+        self.tabs.addTab(self.tabs_lhs,    "Анализ множественных прогонов (LHS-анализ)")
         main.addWidget(self.tabs)
 
         self.progress_bar = QProgressBar()
@@ -956,28 +1367,94 @@ class DebrisFlowDialog(QDialog):
         self.log_box.setMaximumHeight(150)
         main.addWidget(self.log_box)
 
+        # кнопки запуска — на подвкладке 4 каждой вкладки: запуск после настройки всех подвкладок
         btns = QHBoxLayout()
         self.btn_run = QPushButton("▶  Запуск симуляции")
         self.btn_run.setStyleSheet("font-weight:bold; padding:6px;")
         self.btn_run.clicked.connect(self._on_run)
-        btn_close = QPushButton("Закрыть")
-        btn_close.clicked.connect(self.close)
         btns.addWidget(self.btn_run)
-        btns.addWidget(btn_close)
-        main.addLayout(btns)
+        self.btn_stop = QPushButton("⏹  Стоп")
+        self.btn_stop.setToolTip("Остановить идущий расчёт на ближайшем шаге по времени.")
+        self.btn_stop.setEnabled(False)
+        self.btn_stop.clicked.connect(self._on_stop)
+        btns.addWidget(self.btn_stop)
+        out_single.layout().addLayout(btns)
+
+        # кнопки запуска LHS (журнал — общий, внизу окна)
+        btn_row = QHBoxLayout()
+        self.btn_sweep_run = QPushButton("▶  Запустить LHS-анализ")
+        self.btn_sweep_run.setStyleSheet("font-weight:bold; padding:6px;")
+        self.btn_sweep_run.clicked.connect(self._on_sweep_run)
+        self.btn_sweep_cancel = QPushButton("⏹  Остановить")
+        self.btn_sweep_cancel.setEnabled(False)
+        self.btn_sweep_cancel.clicked.connect(self._on_sweep_cancel)
+        btn_row.addWidget(self.btn_sweep_run)
+        btn_row.addWidget(self.btn_sweep_cancel)
+        out_lhs.layout().addLayout(btn_row)
+
+    # виджеты, которые копирует «Применить настройки из другой подвкладки», по подвкладкам;
+    # для подвкладки 1 копируется ещё таблица источников с гидрографами
+    _SUBTAB_WIDGETS = {
+        1: ("dem_combo", "src_line_combo", "edit_load_path"),
+        2: ("spin_Cv", "spin_Cv_max", "spin_rho_s", "spin_rho_w"),
+        3: ("spin_tend", "spin_dtmax", "spin_cfl", "chk_face_lim", "spin_theta"),
+        4: ("edit_prefix", "edit_outdir", "chk_h_max", "chk_V_max", "chk_HV2_max",
+            "chk_Fr_hv2", "chk_h_final", "chk_t_arrival", "spin_arrival_thr",
+            "chk_threshold", "spin_threshold", "edit_save_path"),
+    }
+
+    def _with_apply(self, page, idx, dst, src) -> QWidget:
+        """Страница подвкладки с кнопкой, копирующей ту же подвкладку панели src в dst."""
+        w = QWidget()
+        lo = QVBoxLayout(w)
+        lo.setContentsMargins(0, 0, 0, 0)
+        btn = QPushButton("Применить настройки из другой подвкладки к этой")
+        btn.clicked.connect(lambda _=False: self._apply_subtab(idx, src, dst))
+        row = QHBoxLayout()
+        row.addWidget(btn)
+        row.addStretch()
+        lo.addLayout(row)
+        lo.addWidget(page)
+        return w
+
+    def _apply_subtab(self, idx, src, dst):
+        """Скопировать настройки подвкладки idx из панели src в панель dst."""
+        for name in self._SUBTAB_WIDGETS[idx]:
+            a, b = getattr(src, name), getattr(dst, name)
+            if isinstance(a, QgsMapLayerComboBox):
+                b.setLayer(a.currentLayer())
+            elif isinstance(a, QCheckBox):
+                b.setChecked(a.isChecked())
+            elif isinstance(a, QLineEdit):
+                b.setText(a.text())
+            else:
+                b.setValue(a.value())
+        if idx == 1:
+            dst._hydro_data     = copy.deepcopy(src._hydro_data)
+            dst._hydro_layer_id = src._hydro_layer_id
+            dst.tbl_sources.setRowCount(0)
+            for row in range(src.tbl_sources.rowCount()):
+                it_id, it_name, it_q = (src.tbl_sources.item(row, c) for c in range(3))
+                if it_id is None:
+                    continue
+                self._add_source_row(dst, int(it_id.text()),
+                                     it_name.text() if it_name else "",
+                                     it_q.text() if it_q else "—")
+            self._refresh_volumes(dst)
+            dst.tbl_sources.resizeRowsToContents()
 
     # ── Вкладка 1: Слои и источники ───────────────────────────────────────────
 
-    def _tab_sources(self) -> QWidget:
+    def _tab_sources(self, p) -> QWidget:
         w = QWidget()
         layout = QVBoxLayout(w)
 
         # DEM
         grp_dem = QGroupBox("ЦМР (DEM)")
         fl_dem = QFormLayout(grp_dem)
-        self.dem_combo = QgsMapLayerComboBox()
-        self.dem_combo.setFilters(QgsMapLayerProxyModel.RasterLayer)
-        fl_dem.addRow("DEM слой:", self.dem_combo)
+        p.dem_combo = QgsMapLayerComboBox()
+        p.dem_combo.setFilters(QgsMapLayerProxyModel.RasterLayer)
+        fl_dem.addRow("DEM слой:", p.dem_combo)
         layout.addWidget(grp_dem)
 
         # Линейный слой источников
@@ -985,14 +1462,14 @@ class DebrisFlowDialog(QDialog):
         lay_src = QVBoxLayout(grp_src)
 
         src_row = QHBoxLayout()
-        self.src_line_combo = QgsMapLayerComboBox()
-        self.src_line_combo.setFilters(QgsMapLayerProxyModel.LineLayer)
-        src_row.addWidget(self.src_line_combo)
+        p.src_line_combo = QgsMapLayerComboBox()
+        p.src_line_combo.setFilters(QgsMapLayerProxyModel.LineLayer)
+        src_row.addWidget(p.src_line_combo)
         btn_load = QPushButton("⟳ Загрузить объекты")
         btn_load.setToolTip(
             "Прочитать объекты (линии) из выбранного слоя\n"
             "и заполнить таблицу источников.")
-        btn_load.clicked.connect(self._load_features)
+        btn_load.clicked.connect(lambda _=False: self._load_features(p))
         src_row.addWidget(btn_load)
         lay_src.addLayout(src_row)
 
@@ -1003,19 +1480,20 @@ class DebrisFlowDialog(QDialog):
         info_lbl.setStyleSheet("color:#555; font-size:10px;")
         lay_src.addWidget(info_lbl)
 
-        self.tbl_sources = QTableWidget()
-        self.tbl_sources.setColumnCount(4)
-        self.tbl_sources.setHorizontalHeaderLabels(
-            ["ID", "Описание", "Q_max (м³/с)", "Гидрограф"])
-        hdr = self.tbl_sources.horizontalHeader()
+        p.tbl_sources = QTableWidget()
+        p.tbl_sources.setColumnCount(5)
+        p.tbl_sources.setHorizontalHeaderLabels(
+            ["ID", "Описание", "Q_max (м³/с)", "V до t_end (м³)", "Гидрограф"])
+        hdr = p.tbl_sources.horizontalHeader()
         hdr.setSectionResizeMode(0, QHeaderView.ResizeToContents)
         hdr.setSectionResizeMode(1, QHeaderView.Stretch)
         hdr.setSectionResizeMode(2, QHeaderView.ResizeToContents)
         hdr.setSectionResizeMode(3, QHeaderView.ResizeToContents)
-        self.tbl_sources.setSelectionBehavior(QTableWidget.SelectRows)
-        self.tbl_sources.setEditTriggers(QTableWidget.NoEditTriggers)
-        self.tbl_sources.setMinimumHeight(160)
-        lay_src.addWidget(self.tbl_sources)
+        hdr.setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        p.tbl_sources.setSelectionBehavior(QTableWidget.SelectRows)
+        p.tbl_sources.setEditTriggers(QTableWidget.NoEditTriggers)
+        p.tbl_sources.setMinimumHeight(160)
+        lay_src.addWidget(p.tbl_sources)
 
         layout.addWidget(grp_src)
 
@@ -1028,23 +1506,23 @@ class DebrisFlowDialog(QDialog):
         load_row = QHBoxLayout(grp_load)
         load_row.setContentsMargins(6, 10, 6, 6)
         load_row.addWidget(QLabel("Файл:"))
-        self.edit_load_path = QLineEdit()
-        self.edit_load_path.setPlaceholderText("Путь к JSON-файлу параметров …")
-        self.edit_load_path.setToolTip(
+        p.edit_load_path = QLineEdit()
+        p.edit_load_path.setPlaceholderText("Путь к JSON-файлу параметров …")
+        p.edit_load_path.setToolTip(
             "JSON-файл, сохранённый ранее кнопкой «Сохранить параметры»\n"
             "на вкладке «Выходные данные».\n"
             "Слои подбираются по имени в текущем проекте QGIS.")
-        load_row.addWidget(self.edit_load_path)
+        load_row.addWidget(p.edit_load_path)
         btn_lb = QPushButton("…")
         btn_lb.setFixedWidth(28)
-        btn_lb.clicked.connect(self._browse_load_file)
+        btn_lb.clicked.connect(lambda _=False: self._browse_load_file(p))
         load_row.addWidget(btn_lb)
         btn_lp = QPushButton("📂 Загрузить")
         btn_lp.setToolTip(
             "Восстановить все параметры из JSON-файла.\n"
             "Слои, гидрографы, реология, настройки решателя\n"
             "и параметры вывода будут заполнены из файла.")
-        btn_lp.clicked.connect(self._load_params)
+        btn_lp.clicked.connect(lambda _=False: self._load_params(p))
         load_row.addWidget(btn_lp)
         layout.addWidget(grp_load)
 
@@ -1057,76 +1535,7 @@ class DebrisFlowDialog(QDialog):
         w = QWidget()
         layout = QVBoxLayout(w)
 
-        # Концентрация
-        grp_conc = QGroupBox("Седиментная концентрация")
-        fl = QFormLayout(grp_conc)
-        self.spin_Cv = QDoubleSpinBox()
-        self.spin_Cv.setRange(0.01, 0.74); self.spin_Cv.setValue(0.40)
-        self.spin_Cv.setDecimals(3)
-        self.spin_Cv.setToolTip(
-            "Объёмная концентрация осадка [-].\n"
-            "Постпожарный диапазон: 0.30–0.55")
-        fl.addRow("Cv:", self.spin_Cv)
-        self.spin_Cv_max = QDoubleSpinBox()
-        self.spin_Cv_max.setRange(0.60, 0.90); self.spin_Cv_max.setValue(0.615)
-        self.spin_Cv_max.setDecimals(3)
-        self.spin_Cv_max.setToolTip(
-            "Предел упаковки Бэгнолда.\nУвеличить если Cv > 0.50.")
-        fl.addRow("Cv_max:", self.spin_Cv_max)
-        layout.addWidget(grp_conc)
-
-        # ── Плотности компонентов ─────────────────────────────────────────────
-        grp_rho = QGroupBox("Плотности компонентов")
-        fl_rho  = QFormLayout(grp_rho)
-
-        self.spin_rho_s = QDoubleSpinBox()
-        self.spin_rho_s.setRange(1000.0, 3500.0)
-        self.spin_rho_s.setValue(2650.0)
-        self.spin_rho_s.setDecimals(0)
-        self.spin_rho_s.setSingleStep(10.0)
-        self.spin_rho_s.setSuffix(" кг/м³")
-        self.spin_rho_s.setToolTip(
-            "Плотность твёрдой фазы ρs [кг/м³].\n\n"
-            "Типичные значения:\n"
-            "  2650 — кварц/гранит (стандарт FLO-2D, Barnhart 2021)\n"
-            "  2700–2800 — андезит, базальт\n"
-            "  2600–2700 — известняк\n"
-            "  1200–2200 — вулканический пепел\n\n"
-            "Barnhart et al. (2021): ρs зафиксирована на 2650 кг/м³,\n"
-            "т.к. скрининг Морриса (1991) показал нечувствительность\n"
-            "результатов к её вариации.\n\n"
-            "Влияет на: γm = ρm·g → τy/(γm·h), K·η/(8·γm·h²).")
-        fl_rho.addRow("ρs — осадок:", self.spin_rho_s)
-
-        self.spin_rho_w = QDoubleSpinBox()
-        self.spin_rho_w.setRange(900.0, 1100.0)
-        self.spin_rho_w.setValue(1000.0)
-        self.spin_rho_w.setDecimals(0)
-        self.spin_rho_w.setSingleStep(1.0)
-        self.spin_rho_w.setSuffix(" кг/м³")
-        self.spin_rho_w.setToolTip(
-            "Плотность жидкой фазы ρw [кг/м³].\n\n"
-            "  1000 — пресная вода (стандарт)\n"
-            "  1025 — морская вода\n\n"
-            "Для всех постпожарных событий материковой зоны\n"
-            "оставьте 1000 кг/м³.")
-        fl_rho.addRow("ρw — жидкость:", self.spin_rho_w)
-
-        lbl_rho_note = QLabel(
-            "ρm = ρs·Cv + ρw·(1–Cv)  →  γm = ρm·g  "
-            "[используется в формуле O'Brien]")
-        lbl_rho_note.setWordWrap(True)
-        lbl_rho_note.setStyleSheet("color:#666; font-size:10px; margin-top:2px")
-        fl_rho.addRow(lbl_rho_note)
-
-        # Индикатор ρm (пересчитывается при изменении Cv, ρs, ρw)
-        self._lbl_rho_m = QLabel()
-        self._lbl_rho_m.setStyleSheet("color:#1565C0; font-size:10px; font-weight:bold")
-        fl_rho.addRow("ρm (текущее):", self._lbl_rho_m)
-        self.spin_rho_s.valueChanged.connect(self._update_rho_m)
-        self.spin_rho_w.valueChanged.connect(self._update_rho_m)
-
-        layout.addWidget(grp_rho)
+        self._grp_conc_rho(self, layout)
 
         # Переключатель режима
         grp_mode = QGroupBox("Режим задания τy и η")
@@ -1150,18 +1559,20 @@ class DebrisFlowDialog(QDialog):
             "QGroupBox::title{color:#1565C0}")
         fl_d = QFormLayout(self._sec_direct)
         self.spin_tau = QDoubleSpinBox()
-        self.spin_tau.setRange(0.01, 50000); self.spin_tau.setValue(600)
+        self.spin_tau.setRange(0.0, 50000); self.spin_tau.setValue(600)
         self.spin_tau.setDecimals(2); self.spin_tau.setSuffix(" Па")
         self.spin_tau.setSingleStep(50)
         self.spin_tau.setToolTip(
             "Предел текучести [Па] "
-            "Постпожарный сель: 200–800 Па.")
+            "Постпожарный сель: 200–800 Па. 0 — без предела текучести (чисто вязкая смесь).")
         fl_d.addRow("τy — Предел текучести:", self.spin_tau)
         self._lbl_hstop = QLabel()
         self._lbl_hstop.setStyleSheet("color:#555;font-size:10px;padding-left:4px")
         fl_d.addRow("", self._lbl_hstop)
         self.spin_tau.valueChanged.connect(self._update_hstop)
         self.spin_Cv.valueChanged.connect(self._update_hstop)
+        self.spin_rho_s.valueChanged.connect(self._update_hstop)
+        self.spin_rho_w.valueChanged.connect(self._update_hstop)
         self.spin_eta = QDoubleSpinBox()
         self.spin_eta.setRange(0.001, 10000); self.spin_eta.setValue(10.0)
         self.spin_eta.setDecimals(3); self.spin_eta.setSuffix(" Па·с")
@@ -1180,22 +1591,38 @@ class DebrisFlowDialog(QDialog):
             "Для полевых условий используйте Режим 1.")
         warn.setStyleSheet("color:#B26A00;font-size:10px")
         fl_e.addRow(warn)
+        info = QLabel(
+            "τy = α₁·exp(β₁·Cv),  η = α₂·exp(β₂·Cv)  (в этом плагине).\n"
+            "В FLO-2D и O'Brien & Julien (1988) индексы обратные:\n"
+            "η = α₁·exp(β₁·Cv), τy = α₂·exp(β₂·Cv) — не переносите α₁/β₁ механически.\n"
+            "В таблице коэффициентов FLO-2D есть лишь сноска «1 Pa = 10 dynes/cm²;\n"
+            "1 Pa·s = 10 poises»: если ваши α в дин/см² и пуазах, умножьте их на 0.1.\n"
+            "Значения по умолчанию: источник не установлен; при Cv = 0.40 они дают\n"
+            "τy ≈ 0.8 Па и η ≈ 26 Па·с.")
+        info.setWordWrap(True)
+        info.setStyleSheet("color:#555;font-size:10px")
+        fl_e.addRow(info)
         self.spin_a1 = QDoubleSpinBox()
-        self.spin_a1.setRange(0.0001,10); self.spin_a1.setValue(0.00423)
+        # сначала число знаков: setRange/setValue округляют до текущего (по умолчанию 2)
         self.spin_a1.setDecimals(5); self.spin_a1.setSingleStep(0.0001)
-        fl_e.addRow("α₁ [Па]:", self.spin_a1)
+        self.spin_a1.setRange(0.0001,10); self.spin_a1.setValue(0.00423)
+        self.spin_a1.setToolTip("Коэффициент предела текучести: τy = α₁·exp(β₁·Cv) [Па]")
+        fl_e.addRow("α₁ (τy) [Па]:", self.spin_a1)
         self.spin_b1 = QDoubleSpinBox()
         self.spin_b1.setRange(1,30); self.spin_b1.setValue(13.11)
         self.spin_b1.setDecimals(2)
-        fl_e.addRow("β₁ [-]:", self.spin_b1)
+        self.spin_b1.setToolTip("Показатель β₁ для предела текучести (безразмерный)")
+        fl_e.addRow("β₁ (τy) [-]:", self.spin_b1)
         self.spin_a2 = QDoubleSpinBox()
-        self.spin_a2.setRange(0.001,10); self.spin_a2.setValue(0.0311)
         self.spin_a2.setDecimals(4); self.spin_a2.setSingleStep(0.001)
-        fl_e.addRow("α₂ [Па·с]:", self.spin_a2)
+        self.spin_a2.setRange(0.001,10); self.spin_a2.setValue(0.0311)
+        self.spin_a2.setToolTip("Коэффициент вязкости: η = α₂·exp(β₂·Cv) [Па·с]")
+        fl_e.addRow("α₂ (η) [Па·с]:", self.spin_a2)
         self.spin_b2 = QDoubleSpinBox()
         self.spin_b2.setRange(1,40); self.spin_b2.setValue(16.81)
         self.spin_b2.setDecimals(2)
-        fl_e.addRow("β₂ [-]:", self.spin_b2)
+        self.spin_b2.setToolTip("Показатель β₂ для вязкости (безразмерный)")
+        fl_e.addRow("β₂ (η) [-]:", self.spin_b2)
         layout.addWidget(self._sec_exp)
 
         # Маннинг + K
@@ -1215,60 +1642,176 @@ class DebrisFlowDialog(QDialog):
         self.spin_K.setToolTip(
             "K — безразмерный коэффициент формы поперечного сечения\n"
             "в вязком члене Sf_visc = K·η·V / (8·γm·h²).\n\n"
-            "Теоретические значения (O'Brien & Julien 1985):\n"
-            "  K = 24 — широкий прямоугольный канал (Бинго-поток)\n"
-            "  K = 8  — трубное течение\n\n"
-            "FLO-2D (Barnhart et al. 2021, Table 1):\n"
-            "  log K от 1.38 до 3.70; экспертное мнение ≈ 2290.\n\n"
-            "По умолчанию: 24 (аналитически строго обоснованное значение).")
+            "Теоретическое значение (O'Brien & Julien 1985):\n"
+            "  K = 24 — широкий прямоугольный канал (бингамовское течение)\n\n"
+            "FLO-2D Mudflow Guidelines: K растёт с шероховатостью и неправильностью\n"
+            "сечения до ~50 000; K = 2285 (калибровка на Rudd Creek) используется\n"
+            "в большинстве городских расчётов.\n"
+            "Barnhart et al. (2021, Table 1): log K от 1.38 до 3.70.\n\n"
+            "По умолчанию 24 — значение для гладкого широкого канала: вязкое\n"
+            "сопротивление при нём примерно в 100 раз слабее, чем при практическом\n"
+            "значении FLO-2D 2285, — калибруйте K или обоснуйте выбор.\n"
+            "NB: в FLO-2D K = 0 означает «вычислить K по n Маннинга»; здесь K = 0\n"
+            "отключило бы вязкий член (поле начинается с 0.001).")
         fl_n.addRow("K — коэф. формы [-]:", self.spin_K)
         layout.addWidget(grp_n)
 
         self._radio_direct.toggled.connect(self._on_rheo_mode)
         self._on_rheo_mode()
         self._update_hstop()
-        self.spin_Cv.valueChanged.connect(self._update_rho_m)
-        self._update_rho_m()   # первый расчёт при открытии
         layout.addStretch()
         return w
 
+    def _grp_conc_rho(self, p, layout):
+        """Группы «Седиментная концентрация» и «Плотности компонентов» панели p."""
+        # Концентрация
+        grp_conc = QGroupBox("Седиментная концентрация")
+        fl = QFormLayout(grp_conc)
+        p.spin_Cv = QDoubleSpinBox()
+        p.spin_Cv.setRange(0.01, 0.74); p.spin_Cv.setValue(0.40)
+        p.spin_Cv.setDecimals(3)
+        p.spin_Cv.setToolTip(
+            "Объёмная концентрация осадка [-].\n"
+            "Постпожарный диапазон: 0.30–0.55")
+        fl.addRow("Cv:", p.spin_Cv)
+        p.spin_Cv_max = QDoubleSpinBox()
+        p.spin_Cv_max.setDecimals(3)
+        p.spin_Cv_max.setRange(0.60, 0.90); p.spin_Cv_max.setValue(0.615)
+        p.spin_Cv_max.setToolTip(
+            "Верхняя граница допустимого Cv (только проверка ввода: Cv должно быть < Cv_max).\n"
+            "Ни в одну формулу не входит и на результат не влияет.\n"
+            "Увеличивать, только если нужно Cv ≥ 0.615.")
+        fl.addRow("Cv_max:", p.spin_Cv_max)
+        layout.addWidget(grp_conc)
+
+        # ── Плотности компонентов ─────────────────────────────────────────────
+        grp_rho = QGroupBox("Плотности компонентов")
+        fl_rho  = QFormLayout(grp_rho)
+
+        p.spin_rho_s = QDoubleSpinBox()
+        p.spin_rho_s.setRange(1000.0, 3500.0)
+        p.spin_rho_s.setValue(2650.0)
+        p.spin_rho_s.setDecimals(0)
+        p.spin_rho_s.setSingleStep(10.0)
+        p.spin_rho_s.setSuffix(" кг/м³")
+        p.spin_rho_s.setToolTip(
+            "Плотность твёрдой фазы ρs [кг/м³].\n\n"
+            "Типичные значения:\n"
+            "  2650 — кварц/гранит (стандарт FLO-2D, Barnhart 2021)\n"
+            "  2700–2800 — андезит, базальт\n"
+            "  2600–2700 — известняк\n"
+            "  1200–2200 — вулканический пепел\n\n"
+            "Barnhart et al. (2021): ρs зафиксирована на 2650 кг/м³,\n"
+            "т.к. скрининг Морриса (1991) показал нечувствительность\n"
+            "результатов к её вариации.\n\n"
+            "Влияет на: γm = ρm·g → τy/(γm·h), K·η/(8·γm·h²).")
+        fl_rho.addRow("ρs — осадок:", p.spin_rho_s)
+
+        p.spin_rho_w = QDoubleSpinBox()
+        p.spin_rho_w.setRange(900.0, 1100.0)
+        p.spin_rho_w.setValue(1000.0)
+        p.spin_rho_w.setDecimals(0)
+        p.spin_rho_w.setSingleStep(1.0)
+        p.spin_rho_w.setSuffix(" кг/м³")
+        p.spin_rho_w.setToolTip(
+            "Плотность жидкой фазы ρw [кг/м³].\n\n"
+            "  1000 — пресная вода (стандарт)\n"
+            "  1025 — морская вода\n\n"
+            "Для всех постпожарных событий материковой зоны\n"
+            "оставьте 1000 кг/м³.")
+        fl_rho.addRow("ρw — жидкость:", p.spin_rho_w)
+
+        lbl_rho_note = QLabel(
+            "ρm = ρs·Cv + ρw·(1–Cv)  →  γm = ρm·g  "
+            "[используется в формуле O'Brien]")
+        lbl_rho_note.setWordWrap(True)
+        lbl_rho_note.setStyleSheet("color:#666; font-size:10px; margin-top:2px")
+        fl_rho.addRow(lbl_rho_note)
+
+        # Индикатор ρm (пересчитывается при изменении Cv, ρs, ρw)
+        p._lbl_rho_m = QLabel()
+        p._lbl_rho_m.setStyleSheet("color:#1565C0; font-size:10px; font-weight:bold")
+        fl_rho.addRow("ρm (текущее):", p._lbl_rho_m)
+        p.spin_rho_s.valueChanged.connect(lambda _v: self._update_rho_m(p))
+        p.spin_rho_w.valueChanged.connect(lambda _v: self._update_rho_m(p))
+
+        layout.addWidget(grp_rho)
+        p.spin_Cv.valueChanged.connect(lambda _v: self._update_rho_m(p))
+        self._update_rho_m(p)
+
     # ── Вкладка 3: Solver Settings ────────────────────────────────────────────
 
-    def _tab_solver(self) -> QWidget:
+    def _tab_solver(self, p) -> QWidget:
         w = QWidget()
         layout = QFormLayout(w)
 
-        self.spin_tend = QSpinBox()
-        self.spin_tend.setRange(60, 86400); self.spin_tend.setValue(3600)
-        self.spin_tend.setSuffix(" с")
-        layout.addRow("Длительность симуляции:", self.spin_tend)
+        p.spin_tend = QSpinBox()
+        p.spin_tend.setRange(60, 86400); p.spin_tend.setValue(3600)
+        p.spin_tend.valueChanged.connect(lambda _v: self._refresh_volumes(p))
+        p.spin_tend.setToolTip(
+            "Моделируемое время [с] от начала гидрографов.\n"
+            "Должно покрывать гидрограф (столбец «V до t_end» на вкладке слоёв\n"
+            "показывает, сколько будет введено) и время остановки потока.\n"
+            "Расчёт заканчивается раньше, если поток полностью остановился.")
+        p.spin_tend.setSuffix(" с")
+        layout.addRow("Длительность симуляции:", p.spin_tend)
 
-        self.spin_dtmax = QDoubleSpinBox()
-        self.spin_dtmax.setRange(0.1, 300); self.spin_dtmax.setValue(5.0)
-        self.spin_dtmax.setSuffix(" с")
-        self.spin_dtmax.setToolTip(
+        p.spin_dtmax = QDoubleSpinBox()
+        p.spin_dtmax.setRange(0.1, 300); p.spin_dtmax.setValue(5.0)
+        p.spin_dtmax.setSuffix(" с")
+        p.spin_dtmax.setToolTip(
             "Максимальный внутренний шаг по времени [с].\n"
             "Реальный шаг ≤ dt_max и дополнительно ограничен CFL.\n"
             "НЕ путать с интервалом обновления прогресс-бара (60 с).\n\n"
-            "Рекомендации:\n"
-            "  DEM 90 м → 30–60 с\n"
-            "  DEM 30 м → 10–30 с\n"
-            "  DEM 10 м →  3–10 с\n"
-            "  DEM  5 м →  1–5 с")
-        layout.addRow("Макс. шаг dt_max:", self.spin_dtmax)
+            "Он важен, пока домен сухой или очень мелкий: когда поток установился,\n"
+            "шаг CFL обычно намного меньше (при h = 1 м и ячейке 5 м — около 1 с).\n"
+            "Но на сетках 30–90 м шаг CFL может превышать 5 с, и тогда dt_max\n"
+            "меняет результат (тестовый конус, ячейка 90 м: h_max различается\n"
+            "до 1.7 м между dt_max = 60 с и 5 с). Первый шаг тоже проверяется\n"
+            "по CFL с учётом глубины от притока.\n"
+            "Проверка: уменьшите dt_max вдвое и сравните h_max.")
+        layout.addRow("Макс. шаг dt_max:", p.spin_dtmax)
 
-        self.spin_cfl = QDoubleSpinBox()
-        self.spin_cfl.setRange(0.10, 0.90); self.spin_cfl.setValue(0.60)
-        self.spin_cfl.setDecimals(2); self.spin_cfl.setSingleStep(0.05)
-        self.spin_cfl.setToolTip(
+        p.spin_cfl = QDoubleSpinBox()
+        p.spin_cfl.setRange(0.10, 0.70); p.spin_cfl.setValue(0.60)
+        p.spin_cfl.setDecimals(2); p.spin_cfl.setSingleStep(0.05)
+        p.spin_cfl.setToolTip(
             "Число Куранта–Фридрихса–Леви (CFL).\n"
             "Контролирует численную устойчивость явной схемы LIA.\n\n"
             "Рекомендуемые значения:\n"
-            "  0.40–0.50 — консервативный (Bates et al. 2010)\n"
+            "  0.40–0.50 — консервативный (рекомендация плагина)\n"
             "  0.60      — стандарт (по умолчанию)\n"
-            "  > 0.70    — только при плоском рельефе, с осторожностью.\n\n"
-            "При CFL > 0.9 возможна числовая неустойчивость.")
-        layout.addRow("Число CFL:", self.spin_cfl)
+            "Допустимый диапазон 0.10–0.70: Bates et al. (2010, ур. 14) дают\n"
+            "коэффициент в диапазоне 0.2–0.7.")
+        layout.addRow("Число CFL:", p.spin_cfl)
+
+        p.chk_face_lim = QCheckBox("Ограничитель глубины на грани  hf ≤ ½(hL+hR)")
+        p.chk_face_lim.setChecked(True)
+        p.chk_face_lim.setToolTip(
+            "Ограничивает глубину потока на грани средним глубин двух ячеек.\n"
+            "Это собственная модификация плагина: литературный источник не найден\n"
+            "(в работах по LIA hf = max(η) − max(z) без такого ограничения).\n"
+            "Замедляет фронт на сухом склоне (тестовый конус: с ограничителем время\n"
+            "добегания больше на 8–13 % при K = 2285 и на 15–18 % при K = 24)\n"
+            "и усиливает пульсации в крутом русле.\n"
+            "Включён по умолчанию — как в опубликованных расчётах.")
+        layout.addRow(p.chk_face_lim)
+
+        p.spin_theta = QDoubleSpinBox()
+        p.spin_theta.setRange(0.50, 1.00); p.spin_theta.setValue(0.80)
+        p.spin_theta.setDecimals(2); p.spin_theta.setSingleStep(0.05)
+        p.spin_theta.setToolTip(
+            "θ-взвешивание расхода (de Almeida et al. 2012):\n"
+            "q* = θ·q + (1−θ)/2·(q_prev + q_next).\n"
+            "Гасит численные колебания схемы LIA в крутых руслах с малым\n"
+            "трением (признак — скорости, упёртые в предел 30 м/с).\n\n"
+            "1.00 — исходная схема Bates et al. (2010), как в опубликованных расчётах.\n"
+            "0.80 — значение по умолчанию в Landlab; обычно 0.7–0.9.")
+        layout.addRow("θ-взвешивание:", p.spin_theta)
+        # скрыты от пользователя: фиксированные значения, ограничитель включён и θ = 0.8
+        for wdg in (p.chk_face_lim, p.spin_theta,
+                    layout.labelForField(p.spin_theta)):
+            wdg.setVisible(False)
 
         lbl = QLabel(
             "<i>h_min = 5 мм зафиксирован автоматически для устойчивости LIA.</i>")
@@ -1279,7 +1822,7 @@ class DebrisFlowDialog(QDialog):
 
     # ── Вкладка 4: Выходные данные ────────────────────────────────────────────
 
-    def _tab_output(self) -> QWidget:
+    def _tab_output(self, p) -> QWidget:
         w = QWidget()
         layout = QVBoxLayout(w)
 
@@ -1287,18 +1830,18 @@ class DebrisFlowDialog(QDialog):
         grp_loc = QGroupBox("Расположение результатов")
         fl = QFormLayout(grp_loc)
 
-        self.edit_prefix = QLineEdit("Debris")
-        self.edit_prefix.setToolTip(
+        p.edit_prefix = QLineEdit("Debris")
+        p.edit_prefix.setToolTip(
             "Базовое имя выходных файлов.\n"
             "Результат: <prefix>_h_max.tif, <prefix>_V_max.tif, ...")
-        fl.addRow("Префикс файлов:", self.edit_prefix)
+        fl.addRow("Префикс файлов:", p.edit_prefix)
 
         out_row = QHBoxLayout()
-        self.edit_outdir = QLineEdit(os.path.expanduser("~/debris_output"))
+        p.edit_outdir = QLineEdit(os.path.expanduser("~/debris_output"))
         btn_browse = QPushButton("…")
         btn_browse.setFixedWidth(30)
-        btn_browse.clicked.connect(self._browse_output)
-        out_row.addWidget(self.edit_outdir)
+        btn_browse.clicked.connect(lambda _=False: self._browse_output(p))
+        out_row.addWidget(p.edit_outdir)
         out_row.addWidget(btn_browse)
         fl.addRow("Папка для файлов:", out_row)
         layout.addWidget(grp_loc)
@@ -1307,36 +1850,71 @@ class DebrisFlowDialog(QDialog):
         grp_layers = QGroupBox("Выходные слои (выберите нужные)")
         fl_l = QVBoxLayout(grp_layers)
 
-        self.chk_h_max = QCheckBox("Пиковая толщина потока  (h_max)")
-        self.chk_h_max.setChecked(True)
-        self.chk_h_max.setToolTip(
+        p.chk_h_max = QCheckBox("Пиковая толщина потока  (h_max)")
+        p.chk_h_max.setChecked(True)
+        p.chk_h_max.setToolTip(
             "Максимальная глубина за всё время симуляции.\n"
             "Основной продукт для оценки опасности.")
-        fl_l.addWidget(self.chk_h_max)
+        fl_l.addWidget(p.chk_h_max)
 
-        self.chk_V_max = QCheckBox(
+        p.chk_V_max = QCheckBox(
             "Пиковая скорость потока  (V_max)")
-        self.chk_V_max.setChecked(True)
-        self.chk_V_max.setToolTip(
+        p.chk_V_max.setChecked(True)
+        p.chk_V_max.setToolTip(
             "Максимальная скорость потока [м/с] за всё время.\n"
             "Используется для оценки динамической нагрузки.")
-        fl_l.addWidget(self.chk_V_max)
+        fl_l.addWidget(p.chk_V_max)
 
-        self.chk_h_final = QCheckBox(
+        p.chk_HV2_max = QCheckBox(
+            "Пиковый поток импульса  h·v²  (HV2_max)")
+        p.chk_HV2_max.setChecked(False)
+        p.chk_HV2_max.setToolTip(
+            "Максимум по времени мгновенного произведения h(t)·v(t)² [м³/с²].\n"
+            "Для оценки ударного воздействия (сила на ед. ширины ≈ ρm·h·v²).\n"
+            "Не путать с h_max·V_max²: оно соединяет две раздельные огибающие\n"
+            "(скорость фронта × глубина тела) и даёт завышенную оценку.")
+        fl_l.addWidget(p.chk_HV2_max)
+
+        p.chk_Fr_hv2 = QCheckBox(
+            "Число Фруда при пике h·v²  (Fr_hv2)")
+        p.chk_Fr_hv2.setChecked(False)
+        p.chk_Fr_hv2.setToolTip(
+            "Fr = V/√(g·h) в момент пикового потока импульса h·v² в ячейке.\n"
+            "Показывает, где локально-инерционное приближение (LIA) работает\n"
+            "вне области применимости: хорошее согласие с полными уравнениями\n"
+            "лишь при Fr < 0.5, выше ошибки растут (de Almeida & Bates 2013).\n"
+            "Только диагностика. Простой максимум Fr не используется: его задаёт\n"
+            "тонкая плёнка на фронте, и он почти везде больше 1.")
+        fl_l.addWidget(p.chk_Fr_hv2)
+
+        p.chk_h_final = QCheckBox(
             "Финальная толщина потока  (h_final)")
-        self.chk_h_final.setChecked(False)
-        self.chk_h_final.setToolTip(
+        p.chk_h_final.setChecked(False)
+        p.chk_h_final.setToolTip(
             "Толщина осадка в момент окончания симуляции.\n"
             "Показывает где поток остановился.")
-        fl_l.addWidget(self.chk_h_final)
+        fl_l.addWidget(p.chk_h_final)
 
-        self.chk_t_arrival = QCheckBox(
+        p.chk_t_arrival = QCheckBox(
             "Время прихода потока  (t_arrival)")
-        self.chk_t_arrival.setChecked(False)
-        self.chk_t_arrival.setToolTip(
+        p.chk_t_arrival.setChecked(False)
+        p.chk_t_arrival.setToolTip(
             "Момент времени [с] когда поток впервые достиг ячейки.\n"
             "Используется для планирования эвакуации.")
-        fl_l.addWidget(self.chk_t_arrival)
+        fl_l.addWidget(p.chk_t_arrival)
+        arr_row = QHBoxLayout()
+        arr_row.addWidget(QLabel("   приход при глубине ≥"))
+        p.spin_arrival_thr = QDoubleSpinBox()
+        p.spin_arrival_thr.setDecimals(3); p.spin_arrival_thr.setSingleStep(0.05)
+        p.spin_arrival_thr.setRange(0.005, 5.0); p.spin_arrival_thr.setValue(0.005)
+        p.spin_arrival_thr.setSuffix(" м")
+        p.spin_arrival_thr.setToolTip(
+            "Глубина, при которой ячейка считается достигнутой для t_arrival.\n"
+            "0.005 м — мокрая плёнка 5 мм (прежнее поведение). Для карт опасности\n"
+            "часто полезнее значимая глубина (например, 0.1–0.3 м).\n"
+            "Задаётся до расчёта: t_arrival записывается во время моделирования.")
+        arr_row.addWidget(p.spin_arrival_thr); arr_row.addStretch()
+        fl_l.addLayout(arr_row)
 
         layout.addWidget(grp_layers)
 
@@ -1344,26 +1922,27 @@ class DebrisFlowDialog(QDialog):
         grp_thresh = QGroupBox("Порог глубины — фильтрация при записи растра")
         fl_th = QFormLayout(grp_thresh)
 
-        self.chk_threshold = QCheckBox(
+        p.chk_threshold = QCheckBox(
             "Показывать только ячейки с глубиной ≥ порога")
-        self.chk_threshold.setChecked(False)
-        self.chk_threshold.setToolTip(
+        p.chk_threshold.setChecked(False)
+        p.chk_threshold.setToolTip(
             "Если включено — ячейки с глубиной меньше порога\n"
             "записываются как NoData (прозрачные в QGIS).\n"
-            "Применяется к слоям h_max и h_final.")
-        self.chk_threshold.toggled.connect(
-            lambda on: self.spin_threshold.setEnabled(on))
-        fl_th.addRow(self.chk_threshold)
+            "Применяется к слоям h_max и h_final; в V_max, h·v² и Fr\n"
+            "также скрываются ячейки, где h_max ниже порога.")
+        p.chk_threshold.toggled.connect(
+            lambda on: p.spin_threshold.setEnabled(on))
+        fl_th.addRow(p.chk_threshold)
 
         thresh_row = QHBoxLayout()
-        self.spin_threshold = QDoubleSpinBox()
-        self.spin_threshold.setRange(0.00, 10.0)
-        self.spin_threshold.setValue(0.10)
-        self.spin_threshold.setDecimals(2)
-        self.spin_threshold.setSingleStep(0.01)
-        self.spin_threshold.setSuffix(" м")
-        self.spin_threshold.setEnabled(False)
-        self.spin_threshold.setToolTip(
+        p.spin_threshold = QDoubleSpinBox()
+        p.spin_threshold.setRange(0.00, 10.0)
+        p.spin_threshold.setValue(0.10)
+        p.spin_threshold.setDecimals(2)
+        p.spin_threshold.setSingleStep(0.01)
+        p.spin_threshold.setSuffix(" м")
+        p.spin_threshold.setEnabled(False)
+        p.spin_threshold.setToolTip(
             "Минимальная глубина [м].\n"
             "Ячейки с h < порога → NoData (прозрачные в QGIS).\n\n"
             "Примеры:\n"
@@ -1371,7 +1950,7 @@ class DebrisFlowDialog(QDialog):
             "  0.10 м — только значимые зоны затопления\n"
             "  0.30 м — порог опасности для пешеходов\n"
             "  1.00 м — порог опасности для зданий")
-        thresh_row.addWidget(self.spin_threshold)
+        thresh_row.addWidget(p.spin_threshold)
 
         for label, val in [("1 см", 0.01), ("10 см", 0.10),
                             ("30 см", 0.30), ("1 м", 1.00)]:
@@ -1380,8 +1959,8 @@ class DebrisFlowDialog(QDialog):
             btn.setToolTip(f"Установить порог {val} м")
             btn.clicked.connect(
                 lambda checked, v=val: (
-                    self.spin_threshold.setValue(v),
-                    self.chk_threshold.setChecked(True),
+                    p.spin_threshold.setValue(v),
+                    p.chk_threshold.setChecked(True),
                 )
             )
             thresh_row.addWidget(btn)
@@ -1406,28 +1985,36 @@ class DebrisFlowDialog(QDialog):
         save_row = QHBoxLayout(grp_save)
         save_row.setContentsMargins(6, 10, 6, 6)
         save_row.addWidget(QLabel("Файл:"))
-        self.edit_save_path = QLineEdit(
+        p.edit_save_path = QLineEdit(
             os.path.join(os.path.expanduser("~"), "debris_params.json"))
-        self.edit_save_path.setToolTip(
+        p.edit_save_path.setToolTip(
             "Путь к JSON-файлу для сохранения всех параметров:\n"
             "слои, гидрографы, реология, решатель, выходные данные.")
-        save_row.addWidget(self.edit_save_path)
+        save_row.addWidget(p.edit_save_path)
         btn_sb = QPushButton("…")
         btn_sb.setFixedWidth(28)
-        btn_sb.clicked.connect(self._browse_save_file)
+        btn_sb.clicked.connect(lambda _=False: self._browse_save_file(p))
         save_row.addWidget(btn_sb)
         btn_sp = QPushButton("💾 Сохранить")
         btn_sp.setToolTip(
             "Сохранить все текущие параметры в JSON-файл.\n"
             "Файл можно загрузить на вкладке «Слои и источники».")
-        btn_sp.clicked.connect(self._save_params)
+        btn_sp.clicked.connect(lambda _=False: self._save_params(p))
         save_row.addWidget(btn_sp)
         layout.addWidget(grp_save)
 
         layout.addStretch()
         return w
 
-    # ── Вкладка 5: LHS-анализ ────────────────────────────────────────────────
+    def _tab_lhs_rheology(self) -> QWidget:
+        """Подвкладка 2 анализа прогонов: только Cv, Cv_max, ρs, ρw."""
+        w = QWidget()
+        layout = QVBoxLayout(w)
+        self._grp_conc_rho(self.lhs, layout)
+        layout.addStretch()
+        return w
+
+    # ── Анализ прогонов: подвкладка 3 «Настройки LHS» ───────────────────────────
 
     def _tab_sweep(self) -> QWidget:
         w  = QWidget()
@@ -1508,6 +2095,8 @@ class DebrisFlowDialog(QDialog):
             "Числовой атрибут точечного слоя, содержащий\n"
             "значение пиковой глубины потока [м].")
         fl_obs.addRow("Поле глубины [м]:", self.combo_depth_field)
+        # комбобокс точек мог уже выбрать слой до подключения layerChanged
+        self._on_obs_pts_changed(self.combo_obs_pts.currentLayer())
 
         self.spin_depth_thr = QDoubleSpinBox()
         self.spin_depth_thr.setRange(0.01, 5.0)
@@ -1541,14 +2130,16 @@ class DebrisFlowDialog(QDialog):
             # Виджет диапазона
             rw = QWidget()
             rh = QHBoxLayout(rw); rh.setContentsMargins(0, 0, 0, 0)
+            # сначала число знаков: setRange/setValue округляют до текущего; decs должно
+            # различать минимум (η: 3 знака, иначе минимум 0.001 становится 0.00 → log10(0))
             s_min = QDoubleSpinBox()
-            s_min.setRange(*rng); s_min.setValue(lo_def)
             s_min.setDecimals(decs); s_min.setSuffix(suffix)
+            s_min.setRange(*rng); s_min.setValue(lo_def)
             s_min.setSingleStep(step)
             setattr(self, mn_attr, s_min)
             s_max = QDoubleSpinBox()
-            s_max.setRange(*rng); s_max.setValue(hi_def)
             s_max.setDecimals(decs); s_max.setSuffix(suffix)
+            s_max.setRange(*rng); s_max.setValue(hi_def)
             s_max.setSingleStep(step)
             setattr(self, mx_attr, s_max)
             rh.addWidget(QLabel("от")); rh.addWidget(s_min)
@@ -1560,8 +2151,8 @@ class DebrisFlowDialog(QDialog):
             fh = QHBoxLayout(fw); fh.setContentsMargins(0, 0, 0, 0)
             fh.addWidget(QLabel("Значение:"))
             s_fix = QDoubleSpinBox()
-            s_fix.setRange(*rng); s_fix.setValue(fix_def)
             s_fix.setDecimals(decs); s_fix.setSuffix(suffix)
+            s_fix.setRange(*rng); s_fix.setValue(fix_def)
             s_fix.setSingleStep(step)
             setattr(self, fix_attr, s_fix)
             fh.addWidget(s_fix)
@@ -1591,7 +2182,7 @@ class DebrisFlowDialog(QDialog):
                    "chk_eta_vary", "spin_eta_fixed",
                    "spin_eta_min",  "spin_eta_max",
                    fix_def=10.0, lo_def=2.0, hi_def=50.0,
-                   suffix=" Па·с", decs=2, step=1.0,
+                   suffix=" Па·с", decs=3, step=1.0,
                    rng=(0.001, 10000))
 
         _param_row("Manning n варьировать",
@@ -1609,18 +2200,28 @@ class DebrisFlowDialog(QDialog):
                    rng=(0.001, 10000.0))
 
         # Фиксированные значения задаются прямо в этой вкладке.
-        # (Cv берётся из вкладки «Параметры O'Brien».)
+        # (Cv задаётся на подвкладке «2. O'Brien».)
         note_rng = QLabel(
             "Включён — параметр варьируется в диапазоне (LHS-выборка).  "
             "Выключен — параметр фиксирован, одно значение для всех прогонов.\n"
-            "При выключении τy, η, n значение берётся автоматически "
-            "из вкладки «Параметры O'Brien».")
+            "При выключенной галочке значение берётся из поля «Значение:» "
+            "этой же вкладки; вкладка «Параметры O'Brien» для него не используется.")
         note_rng.setWordWrap(True)
         note_rng.setStyleSheet("color:#777;font-size:10px;margin-top:2px")
         rng_lo.addWidget(note_rng)
         lo.addWidget(grp_rng)
+        lo.addWidget(self._grp_sweep_cfg())
 
-        # ── Настройки sweep ───────────────────────────────────────────────────
+        # Оборачиваем в QScrollArea для работы на ноутбуках
+        scroll = QScrollArea()
+        scroll.setWidget(w)
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        return scroll
+
+    def _grp_sweep_cfg(self) -> QGroupBox:
+        """Группа «Настройки анализа»: число прогонов, seed, потоки, имя CSV
+        (папка — та, что на подвкладке «5. Выходные данные»)."""
         grp_cfg = QGroupBox("Настройки анализа")
         fl_cfg  = QFormLayout(grp_cfg)
 
@@ -1636,7 +2237,7 @@ class DebrisFlowDialog(QDialog):
         self.spin_seed.setRange(0, 9999); self.spin_seed.setValue(42)
         self.spin_seed.setToolTip(
             "Seed генератора — одинаковый seed → воспроизводимый результат.")
-        fl_cfg.addRow("Random seed:", self.spin_seed)
+        fl_cfg.addRow("Seed генератора:", self.spin_seed)
 
         # Параллельные ядра
         self.spin_n_workers = QSpinBox()
@@ -1653,47 +2254,12 @@ class DebrisFlowDialog(QDialog):
             "Максимум: 16.")
         fl_cfg.addRow("Параллельных ядер:", self.spin_n_workers)
 
-        out_row2 = QHBoxLayout()
-        self.edit_sweep_outdir = QLineEdit(os.path.expanduser("~/debris_sweep"))
-        btn_sweep_out = QPushButton("…")
-        btn_sweep_out.setFixedWidth(30)
-        btn_sweep_out.clicked.connect(self._browse_sweep_outdir)
-        out_row2.addWidget(self.edit_sweep_outdir)
-        out_row2.addWidget(btn_sweep_out)
-        fl_cfg.addRow("Папка результатов:", out_row2)
-
         self.edit_sweep_csv = QLineEdit("sweep_results.csv")
         self.edit_sweep_csv.setToolTip(
             "Имя CSV-файла (сохраняется в папке результатов).\n"
-            "Содержит все 4 параметра + метрики для каждого сценария.")
+            "Содержит все 5 параметров (V, τy, η, n, K) + метрики для каждого сценария.")
         fl_cfg.addRow("Файл CSV:", self.edit_sweep_csv)
-        lo.addWidget(grp_cfg)
-
-        # ── Лог sweep ─────────────────────────────────────────────────────────
-        self.sweep_log_box = QTextEdit()
-        self.sweep_log_box.setReadOnly(True)
-        self.sweep_log_box.setFont(QFont("Courier", 9))
-        self.sweep_log_box.setMaximumHeight(130)
-        lo.addWidget(self.sweep_log_box)
-
-        # ── Кнопки ────────────────────────────────────────────────────────────
-        btn_row = QHBoxLayout()
-        self.btn_sweep_run = QPushButton("▶  Запустить LHS-анализ")
-        self.btn_sweep_run.setStyleSheet("font-weight:bold; padding:6px;")
-        self.btn_sweep_run.clicked.connect(self._on_sweep_run)
-        self.btn_sweep_cancel = QPushButton("⏹  Остановить")
-        self.btn_sweep_cancel.setEnabled(False)
-        self.btn_sweep_cancel.clicked.connect(self._on_sweep_cancel)
-        btn_row.addWidget(self.btn_sweep_run)
-        btn_row.addWidget(self.btn_sweep_cancel)
-        lo.addLayout(btn_row)
-
-        # Оборачиваем в QScrollArea для работы на ноутбуках
-        scroll = QScrollArea()
-        scroll.setWidget(w)
-        scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        return scroll
+        return grp_cfg
 
     # ── Слоты вкладки 5 ──────────────────────────────────────────────────────
 
@@ -1702,10 +2268,9 @@ class DebrisFlowDialog(QDialog):
         self.combo_depth_field.clear()
         if layer is None:
             return
-        numeric = {"double", "real", "float", "integer", "int64", "int",
-                   "int2", "int4", "int8", "numeric", "decimal"}
+        # isNumeric() учитывает и Integer64 (GPKG/SHP); идентификатор "fid" глубиной не бывает
         for field in layer.fields():
-            if field.typeName().lower().split("(")[0] in numeric:
+            if field.isNumeric() and field.name().lower() != "fid":
                 self.combo_depth_field.addItem(field.name())
         # Fallback: добавить все поля если числовых нет
         if self.combo_depth_field.count() == 0:
@@ -1767,8 +2332,9 @@ class DebrisFlowDialog(QDialog):
             "K_fixed":   self.spin_K_fixed.value(),
             # Настройки анализа
             "n_runs":    self.spin_n_runs.value(),
+            "n_workers": self.spin_n_workers.value(),
             "seed":      self.spin_seed.value(),
-            "out_dir":   self.edit_sweep_outdir.text(),
+            "out_dir":   self.lhs.edit_outdir.text(),
             "csv_name":  self.edit_sweep_csv.text(),
         }
         try:
@@ -1844,8 +2410,9 @@ class DebrisFlowDialog(QDialog):
                 self.spin_K_fixed,   "K_vary","K_min","K_max","K_fixed")
 
         if "n_runs"  in d: self.spin_n_runs.setValue(int(d["n_runs"]))
+        if "n_workers" in d: self.spin_n_workers.setValue(int(d["n_workers"]))
         if "seed"    in d: self.spin_seed.setValue(int(d["seed"]))
-        if "out_dir" in d: self.edit_sweep_outdir.setText(d["out_dir"])
+        if "out_dir" in d: self.lhs.edit_outdir.setText(d["out_dir"])
         if "csv_name" in d: self.edit_sweep_csv.setText(d["csv_name"])
 
         msg = "Настройки LHS загружены."
@@ -1855,18 +2422,16 @@ class DebrisFlowDialog(QDialog):
         else:
             QMessageBox.information(self, "Настройки LHS загружены", msg)
 
-    def _browse_sweep_outdir(self):
-        path = QFileDialog.getExistingDirectory(
-            self, "Папка для результатов LHS-анализа",
-            self.edit_sweep_outdir.text())
-        if path:
-            self.edit_sweep_outdir.setText(path)
-
     def _on_sweep_cancel(self):
         if self.sweep_worker and self.sweep_worker.isRunning():
             self.sweep_worker.cancel()
-            self.sweep_log_box.append(
-                "⚠ Отмена — ожидание завершения текущего прогона...")
+            self.log_box.append(
+                "⚠ Отмена — идущие прогоны остановятся на ближайшем шаге...")
+            self.btn_sweep_cancel.setEnabled(False)
+        w = self.sweep_best_worker
+        if w is not None and w.isRunning():
+            w.cancel()
+            self.log_box.append("⚠ Остановка повторного расчёта лучшего прогона на ближайшем шаге...")
             self.btn_sweep_cancel.setEnabled(False)
 
     def _on_sweep_run(self):
@@ -1880,8 +2445,9 @@ class DebrisFlowDialog(QDialog):
                 + _nb_reason)
             return
 
-        dem_layer = self.dem_combo.currentLayer()
-        src_layer = self.src_line_combo.currentLayer()
+        L = self.lhs
+        dem_layer = L.dem_combo.currentLayer()
+        src_layer = L.src_line_combo.currentLayer()
         obs_poly  = self.combo_obs_poly.currentLayer()
         obs_pts   = self.combo_obs_pts.currentLayer()
         depth_fld = self.combo_depth_field.currentText()
@@ -1893,10 +2459,15 @@ class DebrisFlowDialog(QDialog):
             QMessageBox.warning(
                 self, "Ошибка",
                 "Выберите линейный слой источников (Вкладка 1)."); return
-        if self.tbl_sources.rowCount() == 0:
+        if L.tbl_sources.rowCount() == 0:
             QMessageBox.warning(
                 self, "Ошибка",
                 "Загрузите источники — нажмите «Загрузить объекты» (Вкладка 1)."); return
+        if src_layer.id() != L._hydro_layer_id:
+            QMessageBox.warning(
+                self, "Ошибка",
+                "Таблица источников относится к другому линейному слою.\n"
+                "Нажмите «Загрузить объекты» для выбранного слоя (Вкладка 1)."); return
         if obs_poly is None:
             QMessageBox.warning(
                 self, "Ошибка",
@@ -1911,6 +2482,16 @@ class DebrisFlowDialog(QDialog):
                 "Выберите поле глубины [м] в точечном слое."); return
 
         # Валидация диапазонов (только для варьируемых параметров)
+        _crs_msg = _check_dem_crs(dem_layer)
+        if _crs_msg:
+            QMessageBox.warning(self, "CRS", _crs_msg); return
+        Cv = L.spin_Cv.value(); Cv_max = L.spin_Cv_max.value()
+        if Cv >= Cv_max:
+            # иначе все прогоны по одному падают с ValueError
+            QMessageBox.warning(self, "Параметр",
+                                f"Cv ({Cv}) должен быть < Cv_max ({Cv_max}).\n"
+                                "(Вкладка «Параметры O'Brien»)"); return
+
         err = []
         if self.chk_vol_vary.isChecked() and \
                 self.spin_vol_min.value() >= self.spin_vol_max.value():
@@ -1931,28 +2512,54 @@ class DebrisFlowDialog(QDialog):
             QMessageBox.warning(self, "Ошибка диапазонов",
                                  "\n".join(err)); return
 
-        out_dir = self.edit_sweep_outdir.text().strip()
+        out_dir = self.lhs.edit_outdir.text().strip()
         if not out_dir:
             QMessageBox.warning(
                 self, "Ошибка", "Укажите папку для результатов."); return
+        # слои лучшего прогона: префикс, выбор слоёв, глубина прихода и порог с подвкладки 5;
+        # читаются сейчас, чтобы правки во время анализа их не меняли
+        prefix = re.sub(r"[^\w\-]", "_", L.edit_prefix.text().strip())
+        if not prefix:
+            QMessageBox.warning(self, "Ошибка", "Укажите префикс файлов (подвкладка «5. Выходные данные»)."); return
+        self._sweep_out = dict(
+            prefix        = f"{prefix}_LHS_best",
+            wanted        = {k for k, chk in (("h_max", L.chk_h_max), ("V_max", L.chk_V_max),
+                                              ("HV2_max", L.chk_HV2_max), ("Fr_hv2", L.chk_Fr_hv2),
+                                              ("h_final", L.chk_h_final),
+                                              ("t_arrival", L.chk_t_arrival)) if chk.isChecked()},
+            arrival_depth = L.spin_arrival_thr.value(),
+            h_threshold   = (L.spin_threshold.value() if L.chk_threshold.isChecked() else 0.0),
+        )
+        csv_name = self.edit_sweep_csv.text().strip() or "sweep_results.csv"
+        if os.path.exists(os.path.join(out_dir, csv_name)):
+            # CSV, <csv>_context.json и слои лучшего прогона прошлого анализа
+            # были бы перезаписаны без следа
+            if QMessageBox.question(
+                    self, "Файл существует",
+                    f"{os.path.join(out_dir, csv_name)} уже существует.\n"
+                    "Перезаписать результаты прошлого LHS-анализа\n"
+                    "(CSV, _context.json и слои лучшего прогона)?",
+                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+                return
 
         # Сборка источников из таблицы вкладки 1
         sources = []
-        for row in range(self.tbl_sources.rowCount()):
-            fid_item = self.tbl_sources.item(row, 0)
+        for row in range(L.tbl_sources.rowCount()):
+            fid_item = L.tbl_sources.item(row, 0)
             if fid_item is None:
                 continue
             try:
                 fid = int(fid_item.text())
             except ValueError:
                 continue
-            name_item = self.tbl_sources.item(row, 1)
+            name_item = L.tbl_sources.item(row, 1)
             fname = name_item.text() if name_item else f"source_{fid}"
-            data  = self._hydro_data.get(fid)
+            data  = L._hydro_data.get(fid)
             if data is None:
                 continue
             sources.append({
                 "fid":    fid, "name": fname,
+                "wkt":    _feature_wkt(src_layer, fid, dem_layer.crs()),
                 "times":  data["times"],
                 "q_vals": data["q_vals"],
             })
@@ -1972,6 +2579,12 @@ class DebrisFlowDialog(QDialog):
             v = s_fix.value()
             return (v, v)
 
+        # η и K охватывают порядки величины (K: 24…2400) → выборка равномерна по
+        # логарифму, иначе ~90 % значений K лежало бы выше 260
+        def _log_rng(chk, s_min, s_max, s_fix):
+            lo, hi = _rng(chk, s_min, s_max, s_fix)
+            return (math.log10(lo), math.log10(hi))
+
         if self.chk_vol_vary.isChecked():
             lo_vol = math.log10(max(self.spin_vol_min.value(), 1.0))
             hi_vol = math.log10(max(self.spin_vol_max.value(), 2.0))
@@ -1983,12 +2596,12 @@ class DebrisFlowDialog(QDialog):
             "log_vol":   (lo_vol, hi_vol),
             "tau_yield": _rng(self.chk_tau_vary, self.spin_tau_min,
                                self.spin_tau_max, self.spin_tau_fixed),
-            "eta":       _rng(self.chk_eta_vary, self.spin_eta_min,
-                               self.spin_eta_max, self.spin_eta_fixed),
+            "log_eta":   _log_rng(self.chk_eta_vary, self.spin_eta_min,
+                                   self.spin_eta_max, self.spin_eta_fixed),
             "manning_n": _rng(self.chk_n_vary,  self.spin_n_min,
                                self.spin_n_max,  self.spin_n_fixed),
-            "K_visc":    _rng(self.chk_K_vary,  self.spin_K_min,
-                               self.spin_K_max,  self.spin_K_fixed),
+            "log_K_visc": _log_rng(self.chk_K_vary, self.spin_K_min,
+                                   self.spin_K_max, self.spin_K_fixed),
         }
 
         params = dict(
@@ -1996,41 +2609,55 @@ class DebrisFlowDialog(QDialog):
             source_layer    = src_layer,
             sources         = sources,
             obs_poly_layer  = obs_poly,
+            obs_poly_wkts   = _layer_wkts(obs_poly, dem_layer.crs()),
+            obs_pts         = _layer_points(obs_pts, depth_fld, dem_layer.crs()),
             obs_pts_layer   = obs_pts,
             depth_field     = depth_fld,
             depth_threshold = self.spin_depth_thr.value(),
-            Cv              = self.spin_Cv.value(),
-            Cv_max          = self.spin_Cv_max.value(),
+            Cv              = L.spin_Cv.value(),
+            Cv_max          = L.spin_Cv_max.value(),
             param_ranges    = param_ranges,
             n_runs          = self.spin_n_runs.value(),
             seed            = self.spin_seed.value(),
-            t_end           = float(self.spin_tend.value()),
-            dt_max          = self.spin_dtmax.value(),
+            t_end           = float(L.spin_tend.value()),
+            dt_max          = L.spin_dtmax.value(),
             out_dir         = out_dir,
-            csv_name        = (self.edit_sweep_csv.text().strip()
-                               or "sweep_results.csv"),
-            cfl_number      = self.spin_cfl.value(),
+            csv_name        = csv_name,
+            cfl_number      = L.spin_cfl.value(),
+            face_depth_limiter = L.chk_face_lim.isChecked(),
+            theta           = L.spin_theta.value(),
             n_workers       = self.spin_n_workers.value(),
-            rho_s           = self.spin_rho_s.value(),
-            rho_w           = self.spin_rho_w.value(),
+            rho_s           = L.spin_rho_s.value(),
+            rho_w           = L.spin_rho_w.value(),
         )
+        try:
+            _detach_layers(params, dem_layer)
+        except Exception as e:
+            QMessageBox.critical(self, "DEM", f"Не удаётся прочитать DEM:\n{type(e).__name__}: {e}")
+            return
+
+        # нужны для повторного расчёта лучшего прогона (слои уже отвязаны)
+        self._sweep_params = params
 
         self._sweep_results  = []
         self._sweep_best_pkg = None
-        self.sweep_log_box.clear()
+        self.log_box.clear()
         self.progress_bar.setValue(0)
         self.btn_sweep_run.setEnabled(False)
         self.btn_sweep_cancel.setEnabled(True)
-        self.sweep_log_box.append(
+        def _rtxt(chk, s_min, s_max, s_fix, fmt):
+            """Диапазон варьируемого параметра или его фиксированное значение (то, что реально берётся)."""
+            if chk.isChecked():
+                return f"{s_min.value():{fmt}} – {s_max.value():{fmt}}"
+            return f"{s_fix.value():{fmt}} (фиксирован)"
+
+        self.log_box.append(
             f"Запуск LHS-анализа: {params['n_runs']} прогонов…\n"
-            f"Объём: {self.spin_vol_min.value():.0f} – "
-            f"{self.spin_vol_max.value():.0f} м³\n"
-            f"τy: {self.spin_tau_min.value():.0f} – "
-            f"{self.spin_tau_max.value():.0f} Па\n"
-            f"η: {self.spin_eta_min.value():.1f} – "
-            f"{self.spin_eta_max.value():.1f} Па·с\n"
-            f"n: {self.spin_n_min.value():.3f} – "
-            f"{self.spin_n_max.value():.3f}")
+            f"Объём: {_rtxt(self.chk_vol_vary, self.spin_vol_min, self.spin_vol_max, self.spin_vol_fixed, '.0f')} м³\n"
+            f"τy: {_rtxt(self.chk_tau_vary, self.spin_tau_min, self.spin_tau_max, self.spin_tau_fixed, '.0f')} Па\n"
+            f"η: {_rtxt(self.chk_eta_vary, self.spin_eta_min, self.spin_eta_max, self.spin_eta_fixed, '.1f')} Па·с\n"
+            f"n: {_rtxt(self.chk_n_vary, self.spin_n_min, self.spin_n_max, self.spin_n_fixed, '.3f')}\n"
+            f"K: {_rtxt(self.chk_K_vary, self.spin_K_min, self.spin_K_max, self.spin_K_fixed, '.1f')}")
 
         self._t_sweep_start = time.time()   # таймер LHS
 
@@ -2049,8 +2676,8 @@ class DebrisFlowDialog(QDialog):
         self.progress_bar.setValue(int(100 * n / max(n_total, 1)))
 
     def _on_sweep_log_msg(self, msg: str):
-        self.sweep_log_box.append(msg)
-        sb = self.sweep_log_box.verticalScrollBar()
+        self.log_box.append(msg)
+        sb = self.log_box.verticalScrollBar()
         sb.setValue(sb.maximum())
 
     def _on_sweep_best_result(self, pkg: dict):
@@ -2060,7 +2687,7 @@ class DebrisFlowDialog(QDialog):
     def _on_sweep_error(self, msg: str):
         self.btn_sweep_run.setEnabled(True)
         self.btn_sweep_cancel.setEnabled(False)
-        self.sweep_log_box.append(f"\n⛔ ОШИБКА:\n{msg}")
+        self.log_box.append(f"\n⛔ ОШИБКА:\n{msg}")
         QMessageBox.critical(self, "Ошибка LHS-анализа", msg[:800])
 
     def _on_sweep_finished(self):
@@ -2071,7 +2698,7 @@ class DebrisFlowDialog(QDialog):
         elapsed_s = time.time() - getattr(self, "_t_sweep_start", time.time())
         n_ok = sum(1 for r in self._sweep_results if r.get("status") == "ok")
         avg_s = elapsed_s / max(n_ok, 1)
-        self.sweep_log_box.append(
+        self.log_box.append(
             f"\n✓ LHS завершён: {n_ok} прогонов за "
             f"{elapsed_s:.0f} с ({elapsed_s/60:.1f} мин), "
             f"ср. {avg_s:.1f} с/прогон")
@@ -2080,75 +2707,130 @@ class DebrisFlowDialog(QDialog):
             QMessageBox.warning(
                 self, "LHS-анализ", "Нет успешных прогонов."); return
 
-        out_dir  = self.edit_sweep_outdir.text().strip()
+        out_dir  = self.lhs.edit_outdir.text().strip()
         csv_name = self.edit_sweep_csv.text().strip() or "sweep_results.csv"
         csv_path = os.path.join(out_dir, csv_name)
         os.makedirs(out_dir, exist_ok=True)
 
-        # ── Запись CSV ────────────────────────────────────────────────────────
-        import csv as _csv
-        ok_rows = [r for r in self._sweep_results if r.get("status") == "ok"]
-        if ok_rows:
-            fieldnames = list(ok_rows[0].keys())
-            # Гарантируем, что все строки имеют те же ключи
-            all_rows = []
-            for r in self._sweep_results:
-                row = {k: r.get(k, None) for k in fieldnames}
-                all_rows.append(row)
-            with open(csv_path, "w", newline="", encoding="utf-8") as f:
-                writer = _csv.DictWriter(f, fieldnames=fieldnames)
-                writer.writeheader()
-                writer.writerows(all_rows)
-            self.sweep_log_box.append(f"\n📋 CSV сохранён: {csv_path}")
-        else:
+        # строки CSV записаны рабочим потоком сразу после каждого прогона (при сбое не теряются)
+        if not os.path.isfile(csv_path):
             csv_path = None
-            self.sweep_log_box.append("\n⚠ Нет успешных прогонов для CSV.")
+        elif any(r.get("status") == "ok" for r in self._sweep_results):
+            self.log_box.append(f"\n📋 CSV сохранён: {csv_path}")
+        else:
+            self.log_box.append("\n⚠ Нет успешных прогонов для CSV.")
 
-        # ── Растровый слой h_max лучшего прогона ─────────────────────────────
-        raster_path = None
+        # ── выбранные слои лучшего прогона: повторный расчёт с его точными параметрами ─
         if self._sweep_best_pkg is not None:
-            base = csv_name.replace(".csv", "")
-            raster_path = os.path.join(out_dir, f"best_h_max_{base}.tif")
-            try:
-                from qgis_runner import write_geotiff
-                # Применяем порог: пиксели < threshold → 0 → nodata (zero_as_nodata=True)
-                thr   = self.spin_depth_thr.value()
-                h_out = self._sweep_best_pkg["h_max"].copy()
-                h_out[h_out < thr] = 0.0
-                write_geotiff(
-                    h_out,
-                    self._sweep_best_pkg["geo_info"],
-                    raster_path,
-                    zero_as_nodata=True,
-                )
-                self.sweep_log_box.append(
-                    f"🗺 Растр h_max (порог ≥ {thr:.2f} м): {raster_path}")
-                from qgis.core import QgsRasterLayer, QgsProject
-                rlayer = QgsRasterLayer(raster_path, "LHS_best_h_max")
-                if rlayer.isValid():
-                    QgsProject.instance().addMapLayer(rlayer)
-                    # Применяем псевдоцвет (depth-стиль)
-                    try:
-                        from .plugin import DebrisFlowPlugin
-                        DebrisFlowPlugin._apply_pseudocolour(rlayer, "depth")
-                    except Exception:
-                        pass
-                else:
-                    self.sweep_log_box.append(
-                        "⚠ Растр создан, но не может быть загружен в QGIS.")
-            except Exception as e:
-                self.sweep_log_box.append(
-                    f"⚠ Ошибка создания растра: {e}")
-                raster_path = None
+            if self.sweep_worker is not None and self.sweep_worker._cancelled:
+                # остановлено пользователем: после «Стоп» лишний расчёт не запускаем
+                self.log_box.append("\nАнализ остановлен: слои лучшего прогона не записываются.")
+            elif self._sweep_out["wanted"]:
+                self._start_best_rerun(out_dir, csv_path)
+                return   # окно результатов откроется после повторного расчёта
+            else:
+                self.log_box.append("\nНа подвкладке «5. Выходные данные» не выбран ни один слой: "
+                        "слои лучшего прогона не записываются.")
+        self._show_sweep_results(None, csv_path)
 
-        # ── Диалог результатов ────────────────────────────────────────────────
+    def _show_sweep_results(self, raster_path, csv_path):
+        """Окно результатов LHS (модальное)."""
         dlg = SweepResultsDialog(
             self, self._sweep_results, raster_path, csv_path)
         dlg.exec_()
 
-    def _browse_save_file(self):
+    def _start_best_rerun(self, out_dir, csv_path):
+        """Повторить лучший прогон LHS с его точной выборкой (тем же кодом, что и одиночный
+        прогон) и записать слои, выбранные на подвкладке 5; h_max сверяется с прогоном LHS."""
+        import dataclasses
+        from .core.rheology import OBrienParameters
+        pkg, sp, so = self._sweep_best_pkg, self._sweep_params, self._sweep_out
+        smp = pkg["sample"]
+        # как в sweep_runner.run_one_sample: масштаб объёма и реология этой выборки
+        target_vol = float(smp.get("vol", pkg["base_vol"]))
+        scale = target_vol / pkg["base_vol"]
+        ob_default = {f.name: f.default for f in dataclasses.fields(OBrienParameters)}
+        params = {
+            "dem_layer":        sp["dem_layer"],
+            "source_layer":     sp["source_layer"],
+            "dem_crs":          sp["dem_crs"],
+            "sources":          [dict(src, q_vals=(np.asarray(src["q_vals"], dtype=np.float64)
+                                                * scale).tolist()) for src in sp["sources"]],
+            "output_dir":       out_dir,
+            "output_prefix":    so["prefix"],
+            "output_layers":    so["wanted"],
+            "Cv":               sp["Cv"],
+            "Cv_max":           sp["Cv_max"],
+            "rho_s":            sp["rho_s"],
+            "rho_w":            sp["rho_w"],
+            "direct_mode":      True,
+            "tau_yield_direct": float(smp["tau_yield"]),
+            "eta_direct":       float(smp["eta"]),
+            "alpha1":           ob_default["alpha1"],
+            "beta1":            ob_default["beta1"],
+            "alpha2":           ob_default["alpha2"],
+            "beta2":            ob_default["beta2"],
+            "manning_n":        float(smp["manning_n"]),
+            "K_visc":           float(smp["K_visc"]),
+            "cfl_number":       sp["cfl_number"],
+            "face_depth_limiter": sp["face_depth_limiter"],
+            "theta":            sp["theta"],
+            "t_end":            sp["t_end"],
+            "dt_max":           sp["dt_max"],
+            "arrival_depth":    so["arrival_depth"],
+            "h_threshold":      so["h_threshold"],
+            "lhs_best_run":     dict(run_id=pkg["run_id"], csv=csv_path, sample=smp,
+                                       base_volume_m3=pkg["base_vol"], metrics=pkg["metrics"]),
+        }
+        if sp.get("_dem_preloaded") is not None:
+            params["_dem_preloaded"] = sp["_dem_preloaded"]
+        self.log_box.append(f"\n▶ Повторный расчёт лучшего прогона №{pkg['run_id']} (Cm = {pkg['metrics'].get('Cm')}) "
+            f"с его точными параметрами для записи выбранных слоёв:\n"
+            f"  V = {target_vol:.0f} м³, τy = {smp['tau_yield']:.2f} Па, η = {smp['eta']:.3f} Па·с, "
+            f"n = {smp['manning_n']:.4f}, K = {smp['K_visc']:.2f}")
+        self._sweep_csv_path = csv_path
+        self.btn_sweep_run.setEnabled(False)
+        self.btn_sweep_cancel.setEnabled(True)
+        self.progress_bar.setValue(0)
+        self.sweep_best_worker = SimulationWorker(params)
+        self.sweep_best_worker.progress.connect(self._on_progress)
+        self.sweep_best_worker.log_message.connect(self._on_log)
+        self.sweep_best_worker.finished.connect(self._on_best_rerun_finished)
+        self.sweep_best_worker.error.connect(self._on_best_rerun_error)
+        self.sweep_best_worker.cancelled.connect(self._on_best_rerun_cancelled)
+        self.sweep_best_worker.start()
+
+    def _end_best_rerun(self):
+        self.btn_sweep_run.setEnabled(True)
+        self.btn_sweep_cancel.setEnabled(False)
+
+    def _on_best_rerun_finished(self, payload: dict):
+        """Повторный расчёт лучшего прогона завершён: проверка h_max, слои, окно результатов."""
+        self._end_best_rerun()
+        self.progress_bar.setValue(100)
+        d = float(np.max(np.abs(payload["result"].h_max - self._sweep_best_pkg["h_max"])))
+        self.log_box.append(f"  Проверка: max |h_max(повтор) − h_max(прогон LHS)| = {d:.3g} м"
+            + (" ✓" if d == 0.0 else "  ⚠ повторный расчёт отличается от прогона LHS"))
+        lines = self._load_result_layers(payload["paths"], payload["prefix"], payload["wanted"])
+        self.log_box.append("Слои лучшего прогона добавлены в QGIS:\n" + "\n".join(lines))
+        self._show_sweep_results(payload["paths"].get(f"{payload['prefix']}_h_max"),
+                                 self._sweep_csv_path)
+
+    def _on_best_rerun_error(self, msg: str):
+        self._end_best_rerun()
+        self.log_box.append(f"\n⛔ Ошибка повторного расчёта лучшего прогона:\n{msg}")
+        QMessageBox.critical(self, "LHS-анализ", msg[:700])
+        self._show_sweep_results(None, self._sweep_csv_path)
+
+    def _on_best_rerun_cancelled(self):
+        self._end_best_rerun()
+        self.progress_bar.setValue(0)
+        self._show_sweep_results(None, self._sweep_csv_path)
+
+    def _browse_save_file(self, p=None):
         """Диалог выбора файла для сохранения параметров."""
-        current = self.edit_save_path.text().strip()
+        p = self if p is None else p
+        current = p.edit_save_path.text().strip()
         start   = os.path.dirname(current) if current else os.path.expanduser("~")
         path, _ = QFileDialog.getSaveFileName(
             self, "Сохранить параметры симуляции",
@@ -2157,19 +2839,20 @@ class DebrisFlowDialog(QDialog):
         if path:
             if not path.lower().endswith(".json"):
                 path += ".json"
-            self.edit_save_path.setText(path)
+            p.edit_save_path.setText(path)
 
-    def _browse_load_file(self):
+    def _browse_load_file(self, p=None):
         """Диалог выбора файла для загрузки параметров."""
-        current = self.edit_load_path.text().strip()
+        p = self if p is None else p
+        current = p.edit_load_path.text().strip()
         start   = os.path.dirname(current) if current else os.path.expanduser("~")
         path, _ = QFileDialog.getOpenFileName(
             self, "Загрузить параметры симуляции",
             start, "JSON параметры (*.json);;All Files (*)")
         if path:
-            self.edit_load_path.setText(path)
+            p.edit_load_path.setText(path)
 
-    def _save_params(self):
+    def _save_params(self, p=None):
         """
         Собрать все параметры из UI и записать в JSON-файл.
         Структура файла:
@@ -2180,13 +2863,14 @@ class DebrisFlowDialog(QDialog):
             "source_table": [ {fid, name, q_max}, ... ],
             "obrien": { Cv, Cv_max, direct_mode, tau_yield, eta,
                         alpha1, beta1, alpha2, beta2, manning_n },
-            "solver": { t_end, dt_max },
+            "solver": { t_end, dt_max, cfl_number, face_depth_limiter, theta },
             "output": { prefix, outdir,
-                        h_max, V_max, h_final, t_arrival,
+                        h_max, V_max, HV2_max, Fr_hv2, h_final, t_arrival,
                         threshold_enabled, threshold_value }
           }
         """
-        path = self.edit_save_path.text().strip()
+        p = self if p is None else p
+        path = p.edit_save_path.text().strip()
         if not path:
             QMessageBox.warning(
                 self, "Нет пути",
@@ -2198,8 +2882,8 @@ class DebrisFlowDialog(QDialog):
             path += ".json"
 
         # --- layers ---
-        dem_layer = self.dem_combo.currentLayer()
-        src_layer = self.src_line_combo.currentLayer()
+        dem_layer = p.dem_combo.currentLayer()
+        src_layer = p.src_line_combo.currentLayer()
         layers_sec = {
             "dem_name":    dem_layer.name()    if dem_layer else "",
             "source_name": src_layer.name()    if src_layer else "",
@@ -2208,15 +2892,15 @@ class DebrisFlowDialog(QDialog):
         # --- hydrographs: ключи int → str для JSON ---
         hydro_sec = {
             str(fid): data
-            for fid, data in self._hydro_data.items()
+            for fid, data in p._hydro_data.items()
         }
 
         # --- source table rows (для восстановления описаний) ---
         table_rows = []
-        for row in range(self.tbl_sources.rowCount()):
-            fid_item  = self.tbl_sources.item(row, 0)
-            name_item = self.tbl_sources.item(row, 1)
-            q_item    = self.tbl_sources.item(row, 2)
+        for row in range(p.tbl_sources.rowCount()):
+            fid_item  = p.tbl_sources.item(row, 0)
+            name_item = p.tbl_sources.item(row, 1)
+            q_item    = p.tbl_sources.item(row, 2)
             if fid_item is None:
                 continue
             table_rows.append({
@@ -2227,37 +2911,46 @@ class DebrisFlowDialog(QDialog):
 
         # --- O'Brien ---
         obrien_sec = {
-            "Cv":          self.spin_Cv.value(),
-            "Cv_max":      self.spin_Cv_max.value(),
-            "direct_mode": self._radio_direct.isChecked(),
-            "tau_yield":   self.spin_tau.value(),
-            "eta":         self.spin_eta.value(),
-            "alpha1":      self.spin_a1.value(),
-            "beta1":       self.spin_b1.value(),
-            "alpha2":      self.spin_a2.value(),
-            "beta2":       self.spin_b2.value(),
-            "manning_n":   self.spin_n.value(),
-            "K_visc":      self.spin_K.value(),
-            "rho_s":       self.spin_rho_s.value(),
-            "rho_w":       self.spin_rho_w.value(),
+            "Cv":          p.spin_Cv.value(),
+            "Cv_max":      p.spin_Cv_max.value(),
         }
+        if p is self:   # реология одиночного прогона; LHS-анализ варьирует её на своей подвкладке
+            obrien_sec.update({
+                "direct_mode": self._radio_direct.isChecked(),
+                "tau_yield":   self.spin_tau.value(),
+                "eta":         self.spin_eta.value(),
+                "alpha1":      self.spin_a1.value(),
+                "beta1":       self.spin_b1.value(),
+                "alpha2":      self.spin_a2.value(),
+                "beta2":       self.spin_b2.value(),
+                "manning_n":   self.spin_n.value(),
+                "K_visc":      self.spin_K.value(),
+            })
+        obrien_sec["rho_s"] = p.spin_rho_s.value()
+        obrien_sec["rho_w"] = p.spin_rho_w.value()
 
         # --- Solver ---
         solver_sec = {
-            "t_end":  self.spin_tend.value(),
-            "dt_max": self.spin_dtmax.value(),
+            "t_end":  p.spin_tend.value(),
+            "dt_max": p.spin_dtmax.value(),
+            "cfl_number": p.spin_cfl.value(),
+            "face_depth_limiter": p.chk_face_lim.isChecked(),
+            "theta":  p.spin_theta.value(),
         }
 
         # --- Output ---
         output_sec = {
-            "prefix":            self.edit_prefix.text(),
-            "outdir":            self.edit_outdir.text(),
-            "h_max":             self.chk_h_max.isChecked(),
-            "V_max":             self.chk_V_max.isChecked(),
-            "h_final":           self.chk_h_final.isChecked(),
-            "t_arrival":         self.chk_t_arrival.isChecked(),
-            "threshold_enabled": self.chk_threshold.isChecked(),
-            "threshold_value":   self.spin_threshold.value(),
+            "prefix":            p.edit_prefix.text(),
+            "outdir":            p.edit_outdir.text(),
+            "h_max":             p.chk_h_max.isChecked(),
+            "V_max":             p.chk_V_max.isChecked(),
+            "HV2_max":           p.chk_HV2_max.isChecked(),
+            "Fr_hv2":            p.chk_Fr_hv2.isChecked(),
+            "h_final":           p.chk_h_final.isChecked(),
+            "t_arrival":         p.chk_t_arrival.isChecked(),
+            "arrival_depth":     p.spin_arrival_thr.value(),
+            "threshold_enabled": p.chk_threshold.isChecked(),
+            "threshold_value":   p.spin_threshold.value(),
         }
 
         payload = {
@@ -2282,12 +2975,13 @@ class DebrisFlowDialog(QDialog):
                 self, "Ошибка сохранения",
                 f"Не удалось записать файл:\n{e}")
 
-    def _load_params(self):
+    def _load_params(self, p=None):
         """
         Загрузить параметры из JSON-файла и восстановить UI.
         Слои ищутся по имени в текущем проекте QGIS.
         """
-        path = self.edit_load_path.text().strip()
+        p = self if p is None else p
+        path = p.edit_load_path.text().strip()
         if not path:
             path, _ = QFileDialog.getOpenFileName(
                 self, "Загрузить параметры симуляции",
@@ -2295,7 +2989,7 @@ class DebrisFlowDialog(QDialog):
                 "JSON параметры (*.json);;All Files (*)")
             if not path:
                 return
-            self.edit_load_path.setText(path)
+            p.edit_load_path.setText(path)
 
         if not os.path.isfile(path):
             QMessageBox.warning(
@@ -2322,7 +3016,7 @@ class DebrisFlowDialog(QDialog):
         if dem_name:
             matches = QgsProject.instance().mapLayersByName(dem_name)
             if matches:
-                self.dem_combo.setLayer(matches[0])
+                p.dem_combo.setLayer(matches[0])
             else:
                 warnings.append(
                     f"DEM слой «{dem_name}» не найден в проекте.")
@@ -2331,24 +3025,27 @@ class DebrisFlowDialog(QDialog):
         if src_name:
             matches = QgsProject.instance().mapLayersByName(src_name)
             if matches:
-                self.src_line_combo.setLayer(matches[0])
+                p.src_line_combo.setLayer(matches[0])
             else:
                 warnings.append(
                     f"Слой источников «{src_name}» не найден в проекте.")
 
         # --- Гидрографы ---
         hydro_sec = data.get("hydrographs", {})
-        self._hydro_data = {}
+        p._hydro_data = {}
+        _src = p.src_line_combo.currentLayer()
+        p._hydro_layer_id = _src.id() if (src_name and _src is not None
+                                             and _src.name() == src_name) else None
         for fid_str, hdata in hydro_sec.items():
             try:
-                self._hydro_data[int(fid_str)] = hdata
+                p._hydro_data[int(fid_str)] = hdata
             except ValueError:
                 pass  # некорректный ключ — пропускаем
 
         # --- Таблица источников: восстановить строки из source_table ---
         table_rows = data.get("source_table", [])
-        if table_rows and self._hydro_data:
-            self.tbl_sources.setRowCount(0)
+        if table_rows and p._hydro_data:
+            p.tbl_sources.setRowCount(0)
             for row_data in table_rows:
                 try:
                     fid  = int(row_data.get("fid", -1))
@@ -2357,75 +3054,71 @@ class DebrisFlowDialog(QDialog):
                 fname  = row_data.get("name", f"Линия {fid}")
                 q_disp = row_data.get("q_max_display", "—")
 
-                row = self.tbl_sources.rowCount()
-                self.tbl_sources.insertRow(row)
+                self._add_source_row(p, fid, fname, q_disp)
 
-                id_item = QTableWidgetItem(str(fid))
-                id_item.setTextAlignment(Qt.AlignCenter)
-                id_item.setFlags(id_item.flags() & ~Qt.ItemIsEditable)
-                self.tbl_sources.setItem(row, 0, id_item)
-
-                name_item = QTableWidgetItem(fname)
-                name_item.setFlags(name_item.flags() & ~Qt.ItemIsEditable)
-                self.tbl_sources.setItem(row, 1, name_item)
-
-                q_item = QTableWidgetItem(q_disp)
-                q_item.setTextAlignment(Qt.AlignCenter)
-                q_item.setFlags(q_item.flags() & ~Qt.ItemIsEditable)
-                self.tbl_sources.setItem(row, 2, q_item)
-
-                btn = QPushButton("✏ Редактировать...")
-                btn.setProperty("fid",   fid)
-                btn.setProperty("fname", fname)
-                btn.setProperty("row",   row)
-                btn.clicked.connect(self._edit_hydro)
-                self.tbl_sources.setCellWidget(row, 3, btn)
-
-            self.tbl_sources.resizeRowsToContents()
+            self._refresh_volumes(p)
+            p.tbl_sources.resizeRowsToContents()
 
         # --- O'Brien ---
         ob = data.get("obrien", {})
         if ob:
             _sv = lambda spin, key, default=None: (
                 spin.setValue(ob[key]) if key in ob else None)
-            _sv(self.spin_Cv,     "Cv")
-            _sv(self.spin_Cv_max, "Cv_max")
-            _sv(self.spin_tau,    "tau_yield")
-            _sv(self.spin_eta,    "eta")
-            _sv(self.spin_a1,     "alpha1")
-            _sv(self.spin_b1,     "beta1")
-            _sv(self.spin_a2,     "alpha2")
-            _sv(self.spin_b2,     "beta2")
-            _sv(self.spin_n,      "manning_n")
-            if "K_visc" in ob: self.spin_K.setValue(ob["K_visc"])
-            if "rho_s"  in ob: self.spin_rho_s.setValue(ob["rho_s"])
-            if "rho_w"  in ob: self.spin_rho_w.setValue(ob["rho_w"])
-            direct = ob.get("direct_mode", True)
-            self._radio_direct.setChecked(direct)
-            self._radio_exp.setChecked(not direct)
-            self._on_rheo_mode()
-            self._update_hstop()
+            _sv(p.spin_Cv,     "Cv")
+            _sv(p.spin_Cv_max, "Cv_max")
+            if "rho_s"  in ob: p.spin_rho_s.setValue(ob["rho_s"])
+            if "rho_w"  in ob: p.spin_rho_w.setValue(ob["rho_w"])
+            if p is self:   # на подвкладке LHS есть только Cv и плотности
+                _sv(self.spin_tau,    "tau_yield")
+                _sv(self.spin_eta,    "eta")
+                _sv(self.spin_a1,     "alpha1")
+                _sv(self.spin_b1,     "beta1")
+                _sv(self.spin_a2,     "alpha2")
+                _sv(self.spin_b2,     "beta2")
+                _sv(self.spin_n,      "manning_n")
+                if "K_visc" in ob: self.spin_K.setValue(ob["K_visc"])
+                if "direct_mode" in ob:          # нет в файле (старая версия): режим не менять
+                    direct = bool(ob["direct_mode"])
+                    self._radio_direct.setChecked(direct)
+                    self._radio_exp.setChecked(not direct)
+                self._on_rheo_mode()
+                self._update_hstop()
 
         # --- Solver ---
         sv = data.get("solver", {})
         if sv:
-            if "t_end"  in sv: self.spin_tend.setValue(int(sv["t_end"]))
-            if "dt_max" in sv: self.spin_dtmax.setValue(sv["dt_max"])
+            if "t_end"  in sv: p.spin_tend.setValue(int(sv["t_end"]))
+            if "dt_max" in sv: p.spin_dtmax.setValue(sv["dt_max"])
+            if "cfl_number" in sv: p.spin_cfl.setValue(float(sv["cfl_number"]))
+            # face_depth_limiter и theta из файла не применяются: плагин считает с
+            # фиксированными значениями (ограничитель включён, θ = 0.8)
 
         # --- Output ---
         out = data.get("output", {})
         if out:
-            if "prefix"  in out: self.edit_prefix.setText(out["prefix"])
-            if "outdir"  in out: self.edit_outdir.setText(out["outdir"])
-            if "h_max"   in out: self.chk_h_max.setChecked(out["h_max"])
-            if "V_max"   in out: self.chk_V_max.setChecked(out["V_max"])
-            if "h_final" in out: self.chk_h_final.setChecked(out["h_final"])
-            if "t_arrival" in out: self.chk_t_arrival.setChecked(out["t_arrival"])
+            if "prefix"  in out: p.edit_prefix.setText(out["prefix"])
+            if "outdir"  in out: p.edit_outdir.setText(out["outdir"])
+            if "h_max"   in out: p.chk_h_max.setChecked(out["h_max"])
+            if "V_max"   in out: p.chk_V_max.setChecked(out["V_max"])
+            if "HV2_max" in out: p.chk_HV2_max.setChecked(out["HV2_max"])
+            if "Fr_hv2" in out: p.chk_Fr_hv2.setChecked(out["Fr_hv2"])
+            if "h_final" in out: p.chk_h_final.setChecked(out["h_final"])
+            if "t_arrival" in out: p.chk_t_arrival.setChecked(out["t_arrival"])
+            if "arrival_depth" in out: p.spin_arrival_thr.setValue(float(out["arrival_depth"]))
             thr_on  = out.get("threshold_enabled", False)
             thr_val = out.get("threshold_value", 0.10)
-            self.chk_threshold.setChecked(thr_on)
-            self.spin_threshold.setValue(thr_val)
-            self.spin_threshold.setEnabled(thr_on)
+            p.chk_threshold.setChecked(thr_on)
+            p.spin_threshold.setValue(thr_val)
+            p.spin_threshold.setEnabled(thr_on)
+
+        # ключи, влияющие на результат, которых нет в старых файлах: действуют текущие
+        # значения виджетов, и пользователь должен видеть, какие именно
+        _missing = ([f"obrien.{k}" for k in (("K_visc", "rho_s", "rho_w", "direct_mode") if p is self
+                                             else ("rho_s", "rho_w")) if k not in ob]
+                    + [f"solver.{k}" for k in ("cfl_number",) if k not in sv])
+        if _missing:
+            warnings.append("Нет в файле (старая версия), оставлены текущие значения: "
+                            + ", ".join(_missing))
 
         # --- Итог ---
         if warnings:
@@ -2441,9 +3134,10 @@ class DebrisFlowDialog(QDialog):
 
     # ── Слоты ─────────────────────────────────────────────────────────────────
 
-    def _load_features(self):
+    def _load_features(self, p=None):
         """Загрузить объекты линейного слоя в таблицу источников."""
-        layer = self.src_line_combo.currentLayer()
+        p = self if p is None else p
+        layer = p.src_line_combo.currentLayer()
         if layer is None:
             QMessageBox.warning(self, "Нет слоя",
                                 "Выберите линейный слой источников.")
@@ -2453,13 +3147,29 @@ class DebrisFlowDialog(QDialog):
                                 "Слой должен быть линейным (LineString).")
             return
 
+        # гидрографы хранятся по fid, а он уникален только внутри слоя:
+        # другой слой не должен их унаследовать
+        if layer.id() != p._hydro_layer_id:
+            # гидрографы из JSON, чей линейный слой не найден по имени: предложить сохранить
+            # их для выбранного слоя, а не молча заменить на 100 м³/с
+            keep = (p._hydro_layer_id is None and bool(p._hydro_data)
+                    and all(layer.getFeature(fid).isValid() for fid in p._hydro_data)
+                    and QMessageBox.question(
+                        self, "Гидрографы из файла",
+                        f"Гидрографы, загруженные из файла параметров ({len(p._hydro_data)}), "
+                        f"не привязаны к слою.\nПрименить их к объектам слоя «{layer.name()}» "
+                        "с теми же ID?",
+                        QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes) == QMessageBox.Yes)
+            if not keep:
+                p._hydro_data = {}
+            p._hydro_layer_id = layer.id()
         feats = list(layer.getFeatures())
         if not feats:
             QMessageBox.warning(self, "Пусто",
                                 "Слой не содержит объектов.")
             return
 
-        self.tbl_sources.setRowCount(0)
+        p.tbl_sources.setRowCount(0)
 
         for feat in feats:
             fid   = feat.id()
@@ -2475,77 +3185,107 @@ class DebrisFlowDialog(QDialog):
             if fname is None:
                 fname = f"Линия {fid}"
 
-            row = self.tbl_sources.rowCount()
-            self.tbl_sources.insertRow(row)
-
-            # ID
-            id_item = QTableWidgetItem(str(fid))
-            id_item.setTextAlignment(Qt.AlignCenter)
-            id_item.setFlags(id_item.flags() & ~Qt.ItemIsEditable)
-            self.tbl_sources.setItem(row, 0, id_item)
-
-            # Описание
-            name_item = QTableWidgetItem(fname)
-            name_item.setFlags(name_item.flags() & ~Qt.ItemIsEditable)
-            self.tbl_sources.setItem(row, 1, name_item)
-
-            # Q_max (обновляется при редактировании гидрографа)
-            data = self._hydro_data.get(fid)
+            data = p._hydro_data.get(fid)
             q_max = max(data["q_vals"]) if data else 0.0
-            q_item = QTableWidgetItem(f"{q_max:.1f}" if q_max > 0 else "—")
-            q_item.setTextAlignment(Qt.AlignCenter)
-            q_item.setFlags(q_item.flags() & ~Qt.ItemIsEditable)
-            self.tbl_sources.setItem(row, 2, q_item)
-
-            # Кнопка редактирования
-            btn = QPushButton("✏ Редактировать...")
-            btn.setProperty("fid", fid)
-            btn.setProperty("fname", fname)
-            btn.setProperty("row", row)
-            btn.clicked.connect(self._edit_hydro)
-            self.tbl_sources.setCellWidget(row, 3, btn)
+            self._add_source_row(p, fid, fname, f"{q_max:.1f}" if q_max > 0 else "—")
 
             # Если для этого fid нет данных — устанавливаем дефолт
-            if fid not in self._hydro_data:
-                self._hydro_data[fid] = {
+            if fid not in p._hydro_data:
+                p._hydro_data[fid] = {
                     "type": "const", "q_const": 100.0,
                     "times": [0.0, 1e9], "q_vals": [100.0, 100.0],
                 }
 
-        self.tbl_sources.resizeRowsToContents()
+        self._refresh_volumes(p)
+        p.tbl_sources.resizeRowsToContents()
 
-    def _edit_hydro(self):
+    def _add_source_row(self, p, fid, fname, q_text):
+        """Добавить строку (ID, описание, Q_max, кнопка редактирования) в таблицу
+        источников панели p; столбец 3 (V до t_end) заполняет _refresh_volumes."""
+        row = p.tbl_sources.rowCount()
+        p.tbl_sources.insertRow(row)
+
+        id_item = QTableWidgetItem(str(fid))
+        id_item.setTextAlignment(Qt.AlignCenter)
+        id_item.setFlags(id_item.flags() & ~Qt.ItemIsEditable)
+        p.tbl_sources.setItem(row, 0, id_item)
+
+        name_item = QTableWidgetItem(fname)
+        name_item.setFlags(name_item.flags() & ~Qt.ItemIsEditable)
+        p.tbl_sources.setItem(row, 1, name_item)
+
+        q_item = QTableWidgetItem(q_text)
+        q_item.setTextAlignment(Qt.AlignCenter)
+        q_item.setFlags(q_item.flags() & ~Qt.ItemIsEditable)
+        p.tbl_sources.setItem(row, 2, q_item)
+
+        btn = QPushButton("✏ Редактировать...")
+        btn.setProperty("fid",   fid)
+        btn.setProperty("fname", fname)
+        btn.setProperty("row",   row)
+        btn.clicked.connect(lambda _=False, b=btn: self._edit_hydro(p, b))
+        p.tbl_sources.setCellWidget(row, 4, btn)
+
+    def _refresh_volumes(self, p=None):
+        """Объём каждого гидрографа, вводимый на [0, t_end] (столбец 3)."""
+        p = self if p is None else p
+        from .core.solver import hydrograph_volume
+        t_end = float(p.spin_tend.value()) if hasattr(p, "spin_tend") else 0.0
+        for row in range(p.tbl_sources.rowCount()):
+            it = p.tbl_sources.item(row, 0)
+            try:
+                fid = int(it.text()) if it is not None else None
+            except ValueError:
+                fid = None
+            data = p._hydro_data.get(fid) if fid is not None else None
+            txt, after = "—", 0.0
+            if data:
+                v = hydrograph_volume(data["times"], data["q_vals"], 0.0, t_end)
+                if data.get("type") != "const":
+                    after = hydrograph_volume(data["times"], data["q_vals"], t_end, 1e12)
+                txt = f"{v:.0f}" + (" ⚠" if after > 0 else "")
+            item = QTableWidgetItem(txt)
+            item.setTextAlignment(Qt.AlignCenter)
+            item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+            item.setToolTip("Объём, вводимый на [0, t_end]; ⚠ — часть гидрографа лежит после t_end\n"
+                        "и не будет введена (увеличьте длительность симуляции).")
+            p.tbl_sources.setItem(row, 3, item)
+
+    def _edit_hydro(self, p=None, btn=None):
         """Открыть редактор гидрографа для выбранного объекта."""
-        btn   = self.sender()
+        p = self if p is None else p
+        btn   = self.sender() if btn is None else btn
         fid   = btn.property("fid")
         fname = btn.property("fname")
         row   = btn.property("row")
 
-        init  = self._hydro_data.get(fid)
+        init  = p._hydro_data.get(fid)
         dlg   = HydrographEditorDialog(self, fid, fname, init)
 
         if dlg.exec_() == QDialog.Accepted:
             result = dlg.get_result()
             if result:
-                self._hydro_data[fid] = result
+                p._hydro_data[fid] = result
                 q_max = max(result["q_vals"])
-                item = self.tbl_sources.item(row, 2)
+                item = p.tbl_sources.item(row, 2)
                 if item:
                     item.setText(f"{q_max:.1f}")
+                self._refresh_volumes(p)
 
     def _on_rheo_mode(self):
         direct = self._radio_direct.isChecked()
         self._sec_direct.setVisible(direct)
         self._sec_exp.setVisible(not direct)
 
-    def _update_rho_m(self):
+    def _update_rho_m(self, p=None):
         """Обновляет индикатор текущей плотности смеси ρm."""
+        p = self if p is None else p
         try:
-            Cv  = self.spin_Cv.value()
-            rho_s = self.spin_rho_s.value()
-            rho_w = self.spin_rho_w.value()
+            Cv  = p.spin_Cv.value()
+            rho_s = p.spin_rho_s.value()
+            rho_w = p.spin_rho_w.value()
             rho_m = rho_s * Cv + rho_w * (1.0 - Cv)
-            self._lbl_rho_m.setText(f"{rho_m:.1f} кг/м³")
+            p._lbl_rho_m.setText(f"{rho_m:.1f} кг/м³")
         except Exception:
             pass
 
@@ -2553,7 +3293,7 @@ class DebrisFlowDialog(QDialog):
         try:
             tau = self.spin_tau.value()
             Cv  = self.spin_Cv.value()
-            rho_m   = 2650. * Cv + 1000. * (1. - Cv)
+            rho_m   = self.spin_rho_s.value() * Cv + self.spin_rho_w.value() * (1. - Cv)
             gamma_m = rho_m * 9.81
             self._lbl_hstop.setText(
                 f"h_stop: {tau/(gamma_m*0.10):.3f} м (10%),  "
@@ -2561,11 +3301,12 @@ class DebrisFlowDialog(QDialog):
         except Exception:
             pass
 
-    def _browse_output(self):
+    def _browse_output(self, p=None):
+        p = self if p is None else p
         path = QFileDialog.getExistingDirectory(
-            self, "Папка для результатов", self.edit_outdir.text())
+            self, "Папка для результатов", p.edit_outdir.text())
         if path:
-            self.edit_outdir.setText(path)
+            p.edit_outdir.setText(path)
 
     # ── Запуск ────────────────────────────────────────────────────────────────
 
@@ -2579,7 +3320,7 @@ class DebrisFlowDialog(QDialog):
         """
         import sys
 
-        # Шаг 1: Numba напрямую (не зависит от sys.path плагина)
+        # Шаг 1: импорт Numba напрямую (не зависит от пакета плагина)
         try:
             import numba
             from numba import njit as _njit_test  # noqa: F401
@@ -2600,16 +3341,20 @@ class DebrisFlowDialog(QDialog):
                 "  • Отсутствует llvmlite или LLVM DLL (Windows)\n"
                 "Попробуйте: pip install --upgrade numba")
 
-        # Шаг 2: проверяем флаг в solver (только если модуль уже импортирован)
-        for key in ('core.solver', 'debris_flow_obrien.core.solver'):
-            solver_mod = sys.modules.get(key)
-            if solver_mod is not None:
-                if not getattr(solver_mod, '_NUMBA_AVAILABLE', True):
-                    return False, (
-                        f"Numba {numba_version} найдена, но отключена в solver.\n"
-                        "Возможно, плагин был загружен до установки Numba.\n"
-                        "Перезапустите QGIS и загрузите плагин заново.")
-                break
+        # Шаг 2: проверяем флаг в нашем solver (только если модуль уже импортирован);
+        # верхнеуровневый `core.solver` другого плагина — не наш и не учитывается
+        solver_mod = sys.modules.get(f"{__package__}.core.solver")
+        if solver_mod is not None and not getattr(solver_mod, '_NUMBA_AVAILABLE', True):
+            np_min = getattr(solver_mod, "np_min", None)
+            if np_min and tuple(int(x) for x in np.__version__.split(".")[:2]) < tuple(np_min):
+                return False, (
+                    f"Numba {numba_version} требует NumPy ≥ {'.'.join(map(str, np_min))}, а установлен NumPy "
+                    f"{np.__version__}, поэтому solver работает на NumPy.\n"
+                    "Обновите NumPy или установите совместимую с ним версию Numba.")
+            return False, (
+                f"Numba {numba_version} найдена, но отключена в solver.\n"
+                "Возможно, плагин был загружен до установки Numba.\n"
+                "Перезапустите QGIS и загрузите плагин заново.")
 
         return True, ""
 
@@ -2639,14 +3384,33 @@ class DebrisFlowDialog(QDialog):
             QMessageBox.warning(
                 self, "Источники не загружены",
                 "Нажмите «Загрузить объекты» чтобы загрузить линии источника."); return
+        if src_layer.id() != self._hydro_layer_id:
+            # таблица и гидрографы относятся к другому слою: по fid взялись бы
+            # геометрии нового слоя со старыми именами и гидрографами
+            QMessageBox.warning(
+                self, "Источники не загружены",
+                "Таблица источников относится к другому линейному слою.\n"
+                "Нажмите «Загрузить объекты» для выбранного слоя."); return
 
         out_dir = self.edit_outdir.text().strip()
         if not out_dir:
             QMessageBox.warning(self, "Нет данных",
                                 "Укажите папку для результатов.\n"
                                 "(Вкладка «Выходные данные»)"); return
+        # проверить папку до расчёта: ошибка после него потеряла бы все результаты
+        try:
+            os.makedirs(out_dir, exist_ok=True)
+            _test = os.path.join(out_dir, f".qdebrisflow_write_test_{os.getpid()}")
+            with open(_test, "w"):
+                pass
+            os.remove(_test)
+        except OSError as e:
+            QMessageBox.warning(self, "Папка результатов",
+                                f"Не удаётся создать папку результатов или записать в неё:\n{out_dir}\n\n{e}")
+            return
 
-        prefix = re.sub(r"[^a-zA-Z0-9_\-]", "_",
+        # \w для str — юникодный: кириллические префиксы сохраняются (раньше схлопывались в "___")
+        prefix = re.sub(r"[^\w\-]", "_",
                         self.edit_prefix.text().strip())
         if not prefix:
             QMessageBox.warning(self, "Нет данных",
@@ -2656,6 +3420,8 @@ class DebrisFlowDialog(QDialog):
         wanted = set()
         if self.chk_h_max.isChecked():    wanted.add("h_max")
         if self.chk_V_max.isChecked():    wanted.add("V_max")
+        if self.chk_HV2_max.isChecked():  wanted.add("HV2_max")
+        if self.chk_Fr_hv2.isChecked():   wanted.add("Fr_hv2")
         if self.chk_h_final.isChecked():  wanted.add("h_final")
         if self.chk_t_arrival.isChecked(): wanted.add("t_arrival")
 
@@ -2664,6 +3430,10 @@ class DebrisFlowDialog(QDialog):
                 self, "Нет выходных слоёв",
                 "Отметьте хотя бы один выходной слой\n"
                 "на вкладке «Выходные данные»."); return
+
+        _crs_msg = _check_dem_crs(dem_layer)
+        if _crs_msg:
+            QMessageBox.warning(self, "CRS", _crs_msg); return
 
         Cv = self.spin_Cv.value(); Cv_max = self.spin_Cv_max.value()
         if Cv >= Cv_max:
@@ -2688,6 +3458,7 @@ class DebrisFlowDialog(QDialog):
             sources.append({
                 "fid":    fid,
                 "name":   fname,
+                "wkt":    _feature_wkt(src_layer, fid, dem_layer.crs()),
                 "times":  data["times"],
                 "q_vals": data["q_vals"],
             })
@@ -2706,6 +3477,8 @@ class DebrisFlowDialog(QDialog):
             "output_layers":    wanted,
             "Cv":               Cv,
             "Cv_max":           Cv_max,
+            "rho_s":            self.spin_rho_s.value(),
+            "rho_w":            self.spin_rho_w.value(),
             "direct_mode":      direct,
             "tau_yield_direct": self.spin_tau.value() if direct else 0.0,
             "eta_direct":       self.spin_eta.value() if direct else 0.0,
@@ -2716,11 +3489,22 @@ class DebrisFlowDialog(QDialog):
             "manning_n":        self.spin_n.value(),
             "K_visc":           self.spin_K.value(),
             "cfl_number":       self.spin_cfl.value(),
+            "face_depth_limiter": self.chk_face_lim.isChecked(),
+            "theta":            self.spin_theta.value(),
             "t_end":            float(self.spin_tend.value()),
             "dt_max":           self.spin_dtmax.value(),
+            "arrival_depth":    self.spin_arrival_thr.value(),
             "h_threshold":      (self.spin_threshold.value()
                                  if self.chk_threshold.isChecked() else 0.0),
         }
+        if dem_layer.crs() != src_layer.crs():
+            params["_crs_note"] = (f"CRS: DEM={dem_layer.crs().authid()}, "
+                                   f"линии={src_layer.crs().authid()} — линии перепроецированы в CRS DEM.")
+        try:
+            _detach_layers(params, dem_layer)
+        except Exception as e:
+            QMessageBox.critical(self, "DEM", f"Не удаётся прочитать DEM:\n{type(e).__name__}: {e}")
+            return
 
         self.btn_run.setEnabled(False)
         self.btn_run.setText("⏳  Выполняется...")
@@ -2732,7 +3516,21 @@ class DebrisFlowDialog(QDialog):
         self.worker.log_message.connect(self._on_log)
         self.worker.finished.connect(self._on_finished)
         self.worker.error.connect(self._on_error)
+        self.worker.cancelled.connect(self._on_cancelled)
         self.worker.start()
+        self.btn_stop.setEnabled(True)
+
+    def _on_stop(self):
+        if self.worker is not None and self.worker.isRunning():
+            self.worker.cancel()
+            self.btn_stop.setEnabled(False)
+            self.log_box.append("Остановка…")
+
+    def _on_cancelled(self):
+        self.btn_stop.setEnabled(False)
+        self.btn_run.setEnabled(True)
+        self.btn_run.setText("▶  Запуск симуляции")
+        self.progress_bar.setValue(0)
 
     def _on_progress(self, t_cur: float, t_end: float):
         self.progress_bar.setValue(
@@ -2745,6 +3543,7 @@ class DebrisFlowDialog(QDialog):
 
     def _on_finished(self, payload: dict):
         elapsed_s = time.time() - getattr(self, "_t_run_start", time.time())
+        self.btn_stop.setEnabled(False)
         self.btn_run.setEnabled(True)
         self.btn_run.setText("▶  Запуск симуляции")
         self.progress_bar.setValue(100)
@@ -2756,27 +3555,7 @@ class DebrisFlowDialog(QDialog):
         prefix  = payload["prefix"]
         wanted  = payload["wanted"]
 
-        # Красивые имена для сообщения
-        layer_names = {
-            "h_max":     "Пиковая толщина",
-            "V_max":     "Пиковая скорость",
-            "h_final":   "Финальные отложения",
-            "t_arrival": "Время прихода",
-        }
-
-        from .plugin import DebrisFlowPlugin
-        lines = []
-        for key in ("h_max", "V_max", "h_final", "t_arrival"):
-            if key not in wanted:
-                continue
-            name = f"{prefix}_{key}"
-            path = paths.get(name)
-            if not path:
-                continue
-            style = "velocity" if key == "V_max" else (
-                    "time"     if key == "t_arrival" else "depth")
-            DebrisFlowPlugin.load_result_layer(path, name, style)
-            lines.append(f"  • {name}  — {layer_names.get(key,'')}")
+        lines = self._load_result_layers(paths, prefix, wanted)
 
         folder = list(paths.values())[0] if paths else out_dir
         QMessageBox.information(
@@ -2784,7 +3563,37 @@ class DebrisFlowDialog(QDialog):
             "Добавлены слои в QGIS:\n" + "\n".join(lines) +
             f"\n\nПапка:\n{os.path.dirname(folder)}")
 
+    def _load_result_layers(self, paths: dict, prefix: str, wanted) -> list:
+        """Загрузить записанные слои в QGIS (имя слоя = имя файла); строки для сообщения."""
+        # Красивые имена для сообщения
+        layer_names = {
+            "h_max":     "Пиковая толщина",
+            "V_max":     "Пиковая скорость",
+            "HV2_max":   "Пиковый поток импульса h·v²",
+            "Fr_hv2":    "Число Фруда при пике h·v²",
+            "h_final":   "Финальные отложения",
+            "t_arrival": "Время прихода",
+        }
+
+        from .plugin import DebrisFlowPlugin
+        lines = []
+        for key in ("h_max", "V_max", "HV2_max", "Fr_hv2", "h_final", "t_arrival"):
+            if key not in wanted:
+                continue
+            name = f"{prefix}_{key}"
+            path = paths.get(name)
+            if not path:
+                continue
+            style = "velocity" if key == "V_max" else (
+                    "intensity" if key == "HV2_max" else (
+                    "froude"   if key == "Fr_hv2" else (
+                    "time"     if key == "t_arrival" else "depth")))
+            DebrisFlowPlugin.load_result_layer(path, name, style)
+            lines.append(f"  • {name}  — {layer_names.get(key,'')}")
+        return lines
+
     def _on_error(self, msg: str):
+        self.btn_stop.setEnabled(False)
         self.btn_run.setEnabled(True)
         self.btn_run.setText("▶  Запуск симуляции")
         self.log_box.append(f"\n⛔ ОШИБКА:\n{msg}")
@@ -2800,7 +3609,7 @@ class SweepResultsDialog(QDialog):
     Отображает итоги LHS-sweep:
       - лучшие параметры (минимальный Cm)
       - таблица топ-10 прогонов
-      - квинтильный анализ чувствительности (Section 7.5)
+      - анализ чувствительности: квинтили Cm, ρ Спирмена, контроль объёма
       - пути к растру и CSV
     """
 
@@ -2925,92 +3734,118 @@ class SweepResultsDialog(QDialog):
 
         inner_lo.addWidget(tbl)
 
-        # ── Квинтильный анализ чувствительности (Section 7.5) ────────────────
-        grp_q = QGroupBox(
-            "Анализ чувствительности к параметрам (Section 7.5 — контроль объёма)")
+        # ── Анализ чувствительности: квинтили Cm, ранговая корреляция ────────
+        grp_q = QGroupBox("Чувствительность к параметрам (квинтили Cm, ранговая корреляция)")
         grp_q.setStyleSheet(
             "QGroupBox{border:1px solid #aaa;border-radius:4px;margin-top:6px}"
             "QGroupBox::title{padding:0 4px}")
         grp_q_lo = QVBoxLayout(grp_q)
 
         note_q = QLabel(
-            "<b>Что это значит (Barnhart et al. 2021, Section 7.5):</b><br>"
-            "Для каждого параметра (τy, η, n) симуляции делятся на 5 квинтилей "
-            "(Q1=малые значения…Q5=большие). Внутри каждого квинтиля вычисляется "
-            "средний Cm. Если квинтили дают разные Cm → параметр важен "
-            "(даже после контроля объёма). Если все квинтили близки → параметр неважен."
-        )
+            "<b>Как читать:</b> для каждого параметра прогоны делятся на 5 квинтилей "
+            "(Q1 = малые значения … Q5 = большие), показан средний Cm в каждом. "
+            "ρ — ранговая корреляция Спирмена между параметром и Cm с 95 % "
+            "бутстреп-интервалом; интервал, не включающий 0, указывает на влияние.<br>"
+            "<b>Контроль объёма</b> (вторая таблица): остатки Cm после линейной регрессии "
+            "Cm на log₁₀V, чтобы сильное влияние объёма не маскировало остальные "
+            "параметры. Это собственная процедура плагина, и она отличается от "
+            "Barnhart et al. (2021, Section 7.5): там каждый вход делится на пять бинов "
+            "и показывается сглаженное среднее Cm в зависимости от эффективного объёма, "
+            "без корреляций и регрессии.")
         note_q.setWordWrap(True)
         note_q.setStyleSheet("font-size:11px; color:#333; margin-bottom:4px")
         grp_q_lo.addWidget(note_q)
 
-        params_sens = [
-            ("tau_yield_Pa", "τy [Па]"),
-            ("eta_Pas",      "η [Па·с]"),
-            ("manning_n",    "n"),
-        ]
+        cm_raw = {id(r): float(r["Cm"]) for r in ok_rows}
+        cm_vc = dict(cm_raw)
+        _vr = [r for r in ok_rows if (r.get("vol_m3") or 0) > 0]
+        if len(_vr) >= 10:
+            _res = _volume_residuals(np.log10([float(r["vol_m3"]) for r in _vr]),
+                                     [cm_raw[id(r)] for r in _vr])
+            for r, v in zip(_vr, _res):
+                cm_vc[id(r)] = float(v)
 
-        sens_tbl = QTableWidget()
-        sens_tbl.setColumnCount(7)  # параметр + Q1..Q5 + разброс
-        sens_tbl.setHorizontalHeaderLabels(
-            ["Параметр", "Q1 (мин.)", "Q2", "Q3", "Q4", "Q5 (макс.)",
-             "Разброс Cm"])
-        sens_tbl.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        sens_tbl.setEditTriggers(QTableWidget.NoEditTriggers)
-        sens_tbl.verticalHeader().setVisible(False)
+        def _sens_table(params_sens, cm_of):
+            tbl = QTableWidget()
+            tbl.setColumnCount(8)
+            tbl.setHorizontalHeaderLabels(["Параметр", "Q1 (мин.)", "Q2", "Q3", "Q4", "Q5 (макс.)", "Разброс Cm", "ρ [95 % ДИ]"])
+            tbl.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+            tbl.setEditTriggers(QTableWidget.NoEditTriggers)
+            tbl.verticalHeader().setVisible(False)
+            for param_key, param_label in params_sens:
+                vals = [(float(r.get(param_key)), cm_of[id(r)], r.get("run_id") or 0)
+                        for r in ok_rows if r.get(param_key) is not None]
+                if len(vals) < 10:
+                    continue
+                if np.ptp([v[0] for v in vals]) == 0:
+                    # параметр зафиксирован: квинтили лишь пересортировали бы по самому Cm
+                    row_i = tbl.rowCount()
+                    tbl.insertRow(row_i)
+                    for c_i, txt in enumerate([param_label] + ["—"] * 5 + ["фиксирован", "—"]):
+                        cell = QTableWidgetItem(txt)
+                        cell.setTextAlignment(Qt.AlignCenter)
+                        tbl.setItem(row_i, c_i, cell)
+                    continue
+                # равные x упорядочиваются по номеру прогона, а не по Cm
+                vals.sort(key=lambda x: (x[0], x[2]))
+                n_q = len(vals)
+                q_size = n_q // 5
+                q_means = []
+                for qi in range(5):
+                    start = qi * q_size
+                    end   = (qi + 1) * q_size if qi < 4 else n_q
+                    q_cm  = [v[1] for v in vals[start:end]]
+                    q_means.append(float(np.mean(q_cm)) if q_cm else float("nan"))
+                spread = max(q_means) - min(q_means)
+                xs = np.array([v[0] for v in vals]); ys = np.array([v[1] for v in vals])
+                if np.ptp(xs) > 0:
+                    rho = _spearman(xs, ys)
+                    lo, hi = _spearman_ci(xs, ys)
+                else:
+                    rho = lo = hi = float("nan")
+                sig = (lo == lo) and not (lo <= 0.0 <= hi)
+                is_important = spread > 0.05 or sig
 
-        for param_key, param_label in params_sens:
-            vals = [(r.get(param_key), r.get("Cm"))
-                    for r in ok_rows
-                    if r.get(param_key) is not None and r.get("Cm") is not None]
-            if len(vals) < 10:
-                continue
-            vals.sort(key=lambda x: x[0])
-            n_q = len(vals)
-            q_size = n_q // 5
-            q_means = []
-            for qi in range(5):
-                start = qi * q_size
-                end   = (qi + 1) * q_size if qi < 4 else n_q
-                q_cm  = [v[1] for v in vals[start:end]]
-                q_means.append(float(np.mean(q_cm)) if q_cm else float("nan"))
+                row_i = tbl.rowCount()
+                tbl.insertRow(row_i)
+                lbl_item = QTableWidgetItem(param_label)
+                lbl_item.setTextAlignment(Qt.AlignCenter)
+                if is_important:
+                    lbl_item.setForeground(QColor("#1565C0"))
+                    lbl_item.setFont(QFont("", -1, QFont.Bold))
+                tbl.setItem(row_i, 0, lbl_item)
+                for qi, cm_mean in enumerate(q_means):
+                    cell = QTableWidgetItem(f"{cm_mean:.3f}" if cm_mean == cm_mean else "—")
+                    cell.setTextAlignment(Qt.AlignCenter)
+                    if cm_mean == cm_mean:
+                        g = int(min(255, max(0, 255 * (1 - cm_mean))))
+                        cell.setBackground(QColor(255 - g // 2, 255, 255 - g // 2))
+                    tbl.setItem(row_i, qi + 1, cell)
+                spread_item = QTableWidgetItem(f"{spread:.3f}")
+                spread_item.setTextAlignment(Qt.AlignCenter)
+                if is_important:
+                    spread_item.setForeground(QColor("#C00000"))
+                    spread_item.setFont(QFont("", -1, QFont.Bold))
+                tbl.setItem(row_i, 6, spread_item)
+                rho_item = QTableWidgetItem(
+                    f"{rho:+.2f} [{lo:+.2f}; {hi:+.2f}]" if rho == rho else "—")
+                rho_item.setTextAlignment(Qt.AlignCenter)
+                if sig:
+                    rho_item.setForeground(QColor("#C00000"))
+                tbl.setItem(row_i, 7, rho_item)
+            tbl.setMaximumHeight(28 * (tbl.rowCount() + 1) + 10)
+            return tbl
 
-            spread = max(q_means) - min(q_means)
-            is_important = spread > 0.05
-
-            row_i = sens_tbl.rowCount()
-            sens_tbl.insertRow(row_i)
-
-            lbl_item = QTableWidgetItem(param_label)
-            lbl_item.setTextAlignment(Qt.AlignCenter)
-            if is_important:
-                lbl_item.setForeground(QColor("#1565C0"))
-                lbl_item.setFont(QFont("", -1, QFont.Bold))
-            sens_tbl.setItem(row_i, 0, lbl_item)
-
-            for qi, cm_mean in enumerate(q_means):
-                cell = QTableWidgetItem(f"{cm_mean:.3f}" if cm_mean == cm_mean else "—")
-                cell.setTextAlignment(Qt.AlignCenter)
-                # Наглядная окраска: низкий Cm = зелёный (лучший)
-                if cm_mean == cm_mean:
-                    g = int(min(255, max(0, 255 * (1 - cm_mean))))
-                    cell.setBackground(QColor(255 - g // 2, 255, 255 - g // 2))
-                sens_tbl.setItem(row_i, qi + 1, cell)
-
-            spread_item = QTableWidgetItem(f"{spread:.3f}")
-            spread_item.setTextAlignment(Qt.AlignCenter)
-            if is_important:
-                spread_item.setForeground(QColor("#C00000"))
-                spread_item.setFont(QFont("", -1, QFont.Bold))
-            sens_tbl.setItem(row_i, 6, spread_item)
-
+        params_all = [("vol_m3", "V [м³]"), ("tau_yield_Pa", "τy [Па]"), ("eta_Pas", "η [Па·с]"),
+                       ("manning_n", "n"), ("K_visc", "K")]
+        sens_tbl = _sens_table(params_all, cm_raw)
         if sens_tbl.rowCount() > 0:
-            sens_tbl.setMaximumHeight(
-                28 * (sens_tbl.rowCount() + 1) + 10)
             grp_q_lo.addWidget(sens_tbl)
+            grp_q_lo.addWidget(QLabel("С контролем объёма (остатки Cm после регрессии на log₁₀V):"))
+            grp_q_lo.addWidget(_sens_table(params_all[1:], cm_vc))
             note_interp = QLabel(
-                "Разброс Cm > 0.05 → параметр ВЛИЯЕТ на результат (выделен синим/красным).<br>"
-                "Разброс Cm ≤ 0.05 → параметр малозначим при данном диапазоне."
+                "Разброс Cm > 0.05 (эвристический порог) или интервал ρ, не включающий 0 → "
+                "параметр ВЛИЯЕТ на результат (выделен синим/красным)."
             )
             note_interp.setWordWrap(True)
             note_interp.setStyleSheet("font-size:10px; color:#555; margin-top:4px")

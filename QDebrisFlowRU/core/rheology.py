@@ -1,7 +1,8 @@
 """
 Реологическая модель O'Brien & Julien (1985, 1988) — квадратичная.
 
-Уклон трения (FLO-2D):
+Уклон трения (форма FLO-2D с постоянным n Маннинга; в FLO-2D Simulating Mudflow
+Guidelines 2021, ур. 18, третий член записан через турбулентно-дисперсионный n_td):
     Sf = τy/(γm·h)  +  K·η·V/(8·γm·h²)  +  n²·V²/h^(4/3)
 
 Два режима задания τy и η
@@ -14,13 +15,21 @@
     τy = alpha1 × exp(beta1 × Cv)
     η  = alpha2 × exp(beta2 × Cv)
 
-Переключение: если tau_yield_direct > 0 → Режим 1, иначе → Режим 2.
+    NB: в FLO-2D и O'Brien & Julien (1988) индексы обратные:
+        η = α1·exp(β1·Cv),  τy = α2·exp(β2·Cv).
+    В таблице коэффициентов FLO-2D есть лишь сноска «1 Pa = 10 dynes/cm²;
+    1 Pa·s = 10 poises»; коэффициенты в дин/см² и пуазах нужно умножить на 0.1.
+    alpha/beta по умолчанию ниже: источник не установлен (τy ≈ 0.8 Па, η ≈ 26 Па·с при Cv = 0.40).
+
+Переключение: режим задаёт direct_mode (True → Режим 1, False → Режим 2); при
+direct_mode=None действует старое правило: tau_yield_direct > 0 → Режим 1, иначе → Режим 2.
 """
 
 from __future__ import annotations
 
 import numpy as np
 from dataclasses import dataclass, field
+from typing import Optional
 
 RHO_WATER:    float = 1000.0
 RHO_SEDIMENT: float = 2650.0
@@ -39,7 +48,7 @@ class OBrienParameters:
 
     # ── Режим 1: прямой ввод τy и η ──────────────────────────────────────────
     tau_yield_direct: float = 0.0
-    """Предел текучести [Па]. Если > 0 — используется напрямую (Режим 1)."""
+    """Предел текучести [Па], используется напрямую в Режиме 1 (τy = 0 там допустим: чисто вязкая смесь)."""
 
     eta_direct: float = 0.0
     """Вязкость смеси [Па·с]. Используется вместе с tau_yield_direct."""
@@ -53,8 +62,13 @@ class OBrienParameters:
     # ── Турбулентный член ─────────────────────────────────────────────────────
     manning_n: float = 0.06
     K_visc:    float = 24.0  # коэф. формы для вязкого члена (24 = широкий канал)
+    # FLO-2D: K растёт до ~50 000 в шероховатых руслах, 2285 — в большинстве городских расчётов.
+    # K = 0 отключает вязкий член (в FLO-2D K = 0 означает «вычислить по n»).
 
     h_min: float = 0.005  # минимальная глубина мокрой ячейки [м]
+    # True → прямой ввод (τy может быть 0: чисто вязкая смесь), False → экспоненциальные
+    # коэффициенты, None → прежнее правило «прямой, если tau_yield_direct > 0» (для старого кода)
+    direct_mode: Optional[bool] = None
 
     # ── Производные ───────────────────────────────────────────────────────────
     rho_mixture:   float = field(init=False)
@@ -76,7 +90,11 @@ class OBrienParameters:
         self.rho_mixture   = self.rho_sediment * self.Cv + self.rho_water * (1.0 - self.Cv)
         self.gamma_mixture = self.rho_mixture * GRAVITY
 
-        self._direct_mode = self.tau_yield_direct > 0.0
+        # явный режим важнее; прежнее правило молча переключало τy = 0 на экспоненциальный режим
+        self._direct_mode = (self.tau_yield_direct > 0.0 if self.direct_mode is None
+                             else bool(self.direct_mode))
+        if self._direct_mode and self.eta_direct <= 0:
+            raise ValueError("В режиме прямого ввода необходимо задать eta_direct > 0")
         if self._direct_mode:
             self.tau_yield = self.tau_yield_direct
             self.eta       = self.eta_direct

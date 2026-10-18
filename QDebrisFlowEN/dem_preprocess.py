@@ -29,8 +29,10 @@ def fill_sinks(dem: np.ndarray, nodata: float = -9999.0,
         Filled DEM array [m], same shape.
     """
     ny, nx = dem.shape
-    valid = dem != nodata
-    filled = dem.copy()
+    valid = np.isfinite(dem) & (dem != nodata)   # NaN nodata too
+    # nodata (finite sentinel or NaN) works as an outlet; with NaN it would spread through
+    # min()/max(), so invalid cells hold -inf here and get their value back at the end
+    filled = np.where(valid, dem, -np.inf)
 
     # Initialise: boundary cells keep their elevation,
     # interior cells set to very high value (will be lowered)
@@ -65,25 +67,27 @@ def fill_sinks(dem: np.ndarray, nodata: float = -9999.0,
             current_dem    = dem[ci_slice, cj_slice]
             is_interior    = interior[ci_slice, cj_slice]
 
-            # A cell should be lowered if a neighbour + epsilon is lower
+            # Planchon & Darboux (2001), both operations at once:
+            #   Z(c) >= W(n)+eps          -> W(c) = Z(c)      (the cell drains)
+            #   W(c) > W(n)+eps > Z(c)    -> W(c) = W(n)+eps  (lower the surface)
+            # i.e. W(c) = max(Z(c), min(W(c), W(n)+eps)) for interior cells.
+            # (The first operation was missing: every cell stayed above its
+            # uphill neighbours and the whole DEM was 'filled'.)
             candidate = neighbour_elev + epsilon
-            should_lower = (
-                is_interior &
-                (candidate < current_elev) &
-                (candidate >= current_dem)  # cannot go below original DEM
+            new_elev = np.where(
+                is_interior,
+                np.maximum(current_dem, np.minimum(current_elev, candidate)),
+                current_elev
             )
 
-            if np.any(should_lower):
-                filled[ci_slice, cj_slice] = np.where(
-                    should_lower,
-                    np.maximum(candidate, current_dem),
-                    current_elev
-                )
+            if np.any(new_elev != current_elev):
+                filled[ci_slice, cj_slice] = new_elev
                 changed = True
 
         if iteration % 100 == 0:
             print(f"  fill_sinks: iteration {iteration}...")
 
+    filled[~valid] = dem[~valid]
     n_filled = np.sum((filled > dem) & valid)
     print(f"fill_sinks: {n_filled} cells modified in {iteration} iterations")
     return filled
@@ -94,12 +98,13 @@ def compute_flow_accumulation(dem_filled: np.ndarray,
     """
     Compute D8 flow accumulation from a filled DEM.
     Useful for identifying main channel paths.
+    Assumes square cells (dx = dy): the D8 distances are 1 and sqrt(2) cells.
 
     Returns:
         accum: Flow accumulation array (number of upstream cells).
     """
     ny, nx = dem_filled.shape
-    valid = dem_filled != nodata
+    valid = np.isfinite(dem_filled) & (dem_filled != nodata)
 
     # D8 flow direction: find steepest downslope neighbour
     dirs = [(-1,-1),(-1,0),(-1,1),(0,-1),(0,1),(1,-1),(1,0),(1,1)]
@@ -148,7 +153,7 @@ def check_dem_quality(dem: np.ndarray, nodata: float = -9999.0) -> dict:
 
     Returns dict with potential issues flagged.
     """
-    valid = dem != nodata
+    valid = np.isfinite(dem) & (dem != nodata)
     dem_v = dem[valid]
 
     issues = []
@@ -215,6 +220,9 @@ if __name__ == "__main__":
 
     assert filled[10, 10] > dem[10, 10], "Sink should be filled"
     assert np.all(filled >= dem), "Filled DEM must be >= original"
+    others = np.ones_like(dem, dtype=bool); others[10, 10] = False
+    assert np.array_equal(filled[others], dem[others]), "Cells without sinks must not change"
+    assert abs(filled[10, 10] - (dem[11, 10] + 0.01)) < 1e-9, "Pit filled to its outlet + epsilon"
     print("✓ fill_sinks OK")
 
     diag = check_dem_quality(dem)

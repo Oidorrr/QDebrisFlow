@@ -3,9 +3,9 @@ core/sweep_runner.py
 ====================
 Executor module for a single LHS run.
 
-Deliberately does NOT import PyQt5, QGIS or dialog.py —
-this allows the function to run in child processes
-(multiprocessing.Pool) without initialising QGIS.
+Deliberately does NOT import PyQt5, QGIS or dialog.py: the function is called
+from SweepWorker directly (1 worker) or from ThreadPoolExecutor threads (> 1);
+multiprocessing.Pool is not used.
 
 Public API:
     run_one_sample(args: dict) -> dict
@@ -34,6 +34,7 @@ def _compute_sweep_metrics(
         obs_cols:   np.ndarray,
         obs_depths: np.ndarray,
         threshold:  float = 0.5,
+        eval_mask:  np.ndarray = None,
 ) -> dict:
     """
     Computes all metrics for a single run.
@@ -43,14 +44,21 @@ def _compute_sweep_metrics(
         FP = over-coverage     ∈ [0, 1]
         FN = under-coverage    ∈ [0, 1]
 
-    ΩT  = (TP−FP−FN)/(TP+FP+FN)          [Heiser 2017, eq.2]
+    ΩT  = (TP−FP−FN)/(TP+FP+FN)          [Heiser et al. 2017; normalised by the union]
     ΩTm = (1−ΩT)/2                        0=best, 1=worst
+        identity: ΩT = 2·CSI − 1 and ΩTm = 1 − CSI, CSI = TP/(TP+FP+FN)
+    eval_mask (optional) — cells outside it are ignored in TP/FP/FN
+        (e.g. channels upstream of the mapped area)
     Δo  = Σ|ri|[ri<0] / Σ|d_obs|          depth overestimation
     Δu  = Σ|ri|[ri>0] / Σ|d_obs|          depth underestimation
     Cm  = (2·ΩTm + Δo,c + Δu) / 4        0=best, 1=worst
     """
     sim_wet  = h_max_sim >= threshold
     obs_bool = obs_mask.astype(bool)
+    if eval_mask is not None:
+        ev = np.asarray(eval_mask, dtype=bool)
+        sim_wet = sim_wet & ev
+        obs_bool = obs_bool & ev
 
     n_TP = int(np.sum( sim_wet &  obs_bool))
     n_FP = int(np.sum( sim_wet & ~obs_bool))
@@ -101,13 +109,13 @@ def _compute_sweep_metrics(
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Single-run worker — called in a child process
+# Single-run worker — called from SweepWorker or its worker threads
 # ──────────────────────────────────────────────────────────────────────────────
 
 def run_one_sample(args: dict) -> dict:
     """
-    Performs a single LHS run. Called in a child process
-    (multiprocessing.Pool) or directly (sequential mode).
+    Performs a single LHS run. Called directly (sequential mode)
+    or from a ThreadPoolExecutor thread (parallel mode).
 
     args parameters (all — serialisable types):
         plugin_dir      str         — path to the plugin directory
@@ -131,14 +139,11 @@ def run_one_sample(args: dict) -> dict:
 
     Returns a row_data dict (including h_max for tracking the best run).
     """
-    # ── Path initialisation (needed in the child process) ────────────────────
-    plugin_dir = args.get("plugin_dir", "")
-    if plugin_dir and plugin_dir not in sys.path:
-        sys.path.insert(0, plugin_dir)
-
+    # relative imports: this module is part of the plugin's `core` package, so a
+    # top-level `core` of another plugin cannot shadow it (args["plugin_dir"] unused)
     try:
-        from core.rheology import OBrienParameters
-        from core.solver   import (TerrainGrid, SimulationConfig,
+        from .rheology import OBrienParameters
+        from .solver   import (TerrainGrid, SimulationConfig,
                                     SourceCondition, InflowSource,
                                     DebrisFlowSolver2D)
     except ImportError as exc:
@@ -175,6 +180,7 @@ def run_one_sample(args: dict) -> dict:
             rho_sediment     = args.get("rho_s", 2650.0),
             rho_water        = args.get("rho_w", 1000.0),
             tau_yield_direct = tau_y,
+            direct_mode      = True,
             eta_direct       = eta,
             manning_n        = n_man,
             K_visc           = k_val,
@@ -203,6 +209,9 @@ def run_one_sample(args: dict) -> dict:
             t_end      = args["t_end"],
             dt_max     = args["dt_max"],
             cfl_number = args["cfl_number"],
+            face_depth_limiter = args.get("face_depth_limiter", True),
+            theta      = args.get("theta", 1.0),
+            cancel_check = args.get("cancel_check"),
         )
 
         result = DebrisFlowSolver2D(
@@ -218,6 +227,7 @@ def run_one_sample(args: dict) -> dict:
             args["obs_cols"],
             args["obs_depths"],
             threshold = args["depth_threshold"],
+            eval_mask = args.get("eval_mask"),
         )
 
         wall_s = time.time() - t0
@@ -226,11 +236,14 @@ def run_one_sample(args: dict) -> dict:
             run_id       = run_id,
             status       = "ok",
             vol_m3       = round(target_vol, 0),
+            vol_in_m3    = round(float(result.total_inflow_vol), 0),
             tau_yield_Pa = round(tau_y,  1),
             eta_Pas      = round(eta,    2),
             manning_n    = round(n_man,  4),
             K_visc       = round(k_val,  1),
             h_max_m      = round(float(result.h_max.max()), 3),
+            edge_h_max_m = round(float(result.edge_h_max), 3),
+            vcap_cells   = int(result.n_vcap_cells),
             h_max        = result.h_max,        # for identifying the best run
             wall_s       = round(wall_s, 1),
             **metrics,
@@ -243,8 +256,8 @@ def run_one_sample(args: dict) -> dict:
 def _error_row(run_id: int, exc: Exception) -> dict:
     """Builds an error row (all numeric fields = None)."""
     null_keys = [
-        "vol_m3", "tau_yield_Pa", "eta_Pas", "manning_n", "K_visc",
-        "h_max_m", "wall_s",
+        "vol_m3", "vol_in_m3", "tau_yield_Pa", "eta_Pas", "manning_n", "K_visc",
+        "h_max_m", "edge_h_max_m", "vcap_cells", "wall_s",
         "TP", "FP", "FN", "omega_Tm", "delta_o_c", "delta_u",
         "Cm", "depth_bias_m",
     ]

@@ -7,17 +7,33 @@ from __future__ import annotations
 import numpy as np
 
 
-def read_dem_array(layer) -> tuple[np.ndarray, dict]:
+class RotatedRasterError(ValueError):
+    """The DEM geotransform has rotation/shear terms or a south-up row order."""
+
+
+def read_dem_array(layer, source=None, crs=None) -> tuple[np.ndarray, dict]:
+    """Массив ЦМР и geo_info. Рабочий поток передаёт layer=None с путём источника
+    и CRS, взятыми в главном потоке, чтобы не вызывать методы слоя; запасной путь
+    через провайдер QGIS требует слой и тогда недоступен."""
     try:
         from osgeo import gdal
-        source = layer.source()
+        if source is None:
+            source = layer.source()
         ds = gdal.Open(source)
         if ds is None:
             raise RuntimeError("GDAL cannot open source")
         band = ds.GetRasterBand(1)
         nodata = band.GetNoDataValue()
         dem = band.ReadAsArray().astype(np.float64)
+        # масштаб/смещение полосы (упакованные целочисленные ЦМР): значение = raw·scale + offset;
+        # nodata остаётся в исходных единицах
+        scale, offset = band.GetScale(), band.GetOffset()
+        if (scale not in (None, 1.0)) or (offset not in (None, 0.0)):
+            valid = (dem != nodata) if nodata is not None else np.ones(dem.shape, dtype=bool)
+            dem[valid] = dem[valid] * (1.0 if scale is None else scale) + (offset or 0.0)
         gt = ds.GetGeoTransform()
+        if gt[2] != 0 or gt[4] != 0 or gt[5] > 0 or gt[1] < 0:
+            raise RotatedRasterError(f"ЦМР не ориентирована на север (геопреобразование {tuple(gt)}); перепроецируйте её в обычный растр.")
         nx, ny = ds.RasterXSize, ds.RasterYSize
         dx, dy = abs(gt[1]), abs(gt[5])
         xmin, ymax = gt[0], gt[3]
@@ -31,12 +47,13 @@ def read_dem_array(layer) -> tuple[np.ndarray, dict]:
             "ymin": ymax - ny * dy,
             "nodata": nodata if nodata is not None else -9999.0,
             "geotransform": gt,
-            "crs": layer.crs(),
+            "crs": crs if crs is not None else layer.crs(),
         }
-        if nodata is not None:
-            dem[dem == nodata] = nodata
         return dem, geo_info
-    except Exception:
+    except (RuntimeError, OSError, ImportError):
+        # GDAL не открывает/не читает источник → провайдер QGIS (RotatedRasterError не перехватывается)
+        if layer is None:
+            raise
         return _read_dem_block(layer)
 
 
@@ -69,6 +86,8 @@ def _read_dem_block(layer) -> tuple[np.ndarray, dict]:
 
 
 def rasterise_source(source_layer, geo_info: dict, default_depth: float) -> np.ndarray:
+    """Плагином не используется: диалог растеризует каждый объект источника сам
+    (SimulationWorker/SweepWorker._rasterise_feature). Оставлено для скриптов."""
     try:
         return _rasterise_gdal(source_layer, geo_info, default_depth)
     except Exception:
@@ -85,11 +104,22 @@ def _rasterise_gdal(source_layer, geo_info: dict, depth: float) -> np.ndarray:
     band = out_ds.GetRasterBand(1)
     band.Fill(0.0)
     band.SetNoDataValue(-9999.0)
-    src_path = source_layer.source().split("|")[0]
+    parts = source_layer.source().split("|")
+    src_path = parts[0]
     vec_ds = ogr.Open(src_path)
     if vec_ds is None:
         raise RuntimeError(f"OGR cannot open {src_path}")
-    vec_lyr = vec_ds.GetLayer()
+    # multi-layer sources (GeoPackage "|layername=…" / "|layerid=…"): take THAT layer,
+    # not the first one in the file
+    opts = dict(p.split("=", 1) for p in parts[1:] if "=" in p)
+    if "layername" in opts:
+        vec_lyr = vec_ds.GetLayerByName(opts["layername"])
+    elif "layerid" in opts:
+        vec_lyr = vec_ds.GetLayer(int(opts["layerid"]))
+    else:
+        vec_lyr = vec_ds.GetLayer()
+    if vec_lyr is None:
+        raise RuntimeError(f"OGR cannot find the layer in {source_layer.source()}")
     gdal.RasterizeLayer(out_ds, [1], vec_lyr, burn_values=[depth])
     h0 = band.ReadAsArray().astype(np.float64)
     out_ds = None

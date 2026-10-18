@@ -24,12 +24,25 @@ class DebrisFlowPlugin:
             "Debris Flows — O'Brien method",
             self.iface.mainWindow(),
         )
-        self.action.setToolTip("Debris Flows — O'Brien method")
+        self.action.setToolTip("QDebrisFlow 1.1")
         self.action.triggered.connect(self.run)
         self.iface.addToolBarIcon(self.action)
         self.iface.addPluginToMenu("Debris Flows", self.action)
 
     def unload(self):
+        # a plugin reload must not leave the old dialog instance behind; a running
+        # worker is cancelled first, otherwise its QThread would be destroyed while running
+        # (merely closing the window still does not stop a simulation — by design)
+        if self.dialog is not None:
+            for w in (getattr(self.dialog, "worker", None),
+                      getattr(self.dialog, "sweep_worker", None),
+                      getattr(self.dialog, "sweep_best_worker", None)):
+                if w is not None and w.isRunning():
+                    w.cancel()
+                    w.wait(30000)
+            self.dialog.close()
+            self.dialog.deleteLater()
+            self.dialog = None
         self.iface.removePluginMenu("Debris Flows", self.action)
         self.iface.removeToolBarIcon(self.action)
         if self.action:
@@ -50,7 +63,15 @@ class DebrisFlowPlugin:
             QMessageBox.critical(None, "Error", f"Failed to load layer:\n{path}")
             return
         DebrisFlowPlugin._apply_pseudocolour(layer, style)
-        QgsProject.instance().addMapLayer(layer)
+        # a re-run with the same prefix: drop the previous layer of this file instead of
+        # adding a duplicate that keeps the old file open
+        prj = QgsProject.instance()
+        norm = os.path.normcase(os.path.abspath(path))
+        old = [lid for lid, lyr in prj.mapLayers().items()
+               if os.path.normcase(os.path.abspath(lyr.source().split("|")[0])) == norm]
+        if old:
+            prj.removeMapLayers(old)
+        prj.addMapLayer(layer)
 
     @staticmethod
     def _apply_pseudocolour(layer, style: str) -> None:
@@ -85,6 +106,20 @@ class DebrisFlowPlugin:
                     QgsColorRampShader.ColorRampItem(vmin + (vmax - vmin) * 0.66, QColor(255, 80, 0), ""),
                     QgsColorRampShader.ColorRampItem(vmax, QColor(180, 0, 0), f"{vmax:.2f} m/s"),
                 ]
+            elif style == "intensity":
+                items = [
+                    QgsColorRampShader.ColorRampItem(vmin, QColor(255, 255, 200), f"{vmin:.2f} m³/s²"),
+                    QgsColorRampShader.ColorRampItem(vmin + (vmax - vmin) * 0.33, QColor(255, 200, 0), ""),
+                    QgsColorRampShader.ColorRampItem(vmin + (vmax - vmin) * 0.66, QColor(255, 80, 0), ""),
+                    QgsColorRampShader.ColorRampItem(vmax, QColor(120, 0, 60), f"{vmax:.2f} m³/s²"),
+                ]
+            elif style == "froude":
+                items = [
+                    QgsColorRampShader.ColorRampItem(vmin, QColor(230, 240, 255), f"Fr {vmin:.2f}"),
+                    QgsColorRampShader.ColorRampItem(min(max(0.5, vmin), vmax), QColor(120, 170, 230), "Fr 0.5"),
+                    QgsColorRampShader.ColorRampItem(min(max(1.0, vmin), vmax), QColor(255, 160, 0), "Fr 1"),
+                    QgsColorRampShader.ColorRampItem(vmax, QColor(170, 0, 0), f"Fr {vmax:.2f}"),
+                ]
             else:  # arrival time
                 items = [
                     QgsColorRampShader.ColorRampItem(vmin, QColor(255, 255, 0), f"{vmin:.0f}s"),
@@ -97,5 +132,7 @@ class DebrisFlowPlugin:
             renderer = QgsSingleBandPseudoColorRenderer(layer.dataProvider(), 1, shader)
             layer.setRenderer(renderer)
             layer.triggerRepaint()
-        except Exception:
-            pass
+        except Exception as e:
+            from qgis.core import QgsMessageLog, Qgis
+            QgsMessageLog.logMessage(f"pseudocolour style not applied to {layer.name()}: "
+                                     f"{type(e).__name__}: {e}", "QDebrisFlow", Qgis.Warning)

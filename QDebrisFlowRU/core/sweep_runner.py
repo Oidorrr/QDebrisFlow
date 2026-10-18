@@ -3,9 +3,9 @@ core/sweep_runner.py
 ====================
 Модуль-исполнитель одиночного LHS-прогона.
 
-Намеренно НЕ импортирует PyQt5, QGIS и dialog.py —
-это позволяет запускать функцию в дочерних процессах
-(multiprocessing.Pool) без инициализации QGIS.
+Намеренно НЕ импортирует PyQt5, QGIS и dialog.py: функция вызывается
+из SweepWorker напрямую (1 поток) или в потоках ThreadPoolExecutor (> 1);
+multiprocessing.Pool не используется.
 
 Публичный API:
     run_one_sample(args: dict) -> dict
@@ -34,6 +34,7 @@ def _compute_sweep_metrics(
         obs_cols:   np.ndarray,
         obs_depths: np.ndarray,
         threshold:  float = 0.5,
+        eval_mask:  np.ndarray = None,
 ) -> dict:
     """
     Вычисляет все метрики для одного прогона.
@@ -43,14 +44,21 @@ def _compute_sweep_metrics(
         FP = переохват        ∈ [0, 1]
         FN = недоохват        ∈ [0, 1]
 
-    ΩT  = (TP−FP−FN)/(TP+FP+FN)          [Heiser 2017, eq.2]
+    ΩT  = (TP−FP−FN)/(TP+FP+FN)          [Heiser et al. 2017; нормировка на объединение]
     ΩTm = (1−ΩT)/2                        0=лучший, 1=худший
+        тождество: ΩT = 2·CSI − 1 и ΩTm = 1 − CSI, CSI = TP/(TP+FP+FN)
+    eval_mask (необязательно) — ячейки вне маски не учитываются в TP/FP/FN
+        (например, русла выше картированной зоны)
     Δo  = Σ|ri|[ri<0] / Σ|d_obs|          переоценка глубины
     Δu  = Σ|ri|[ri>0] / Σ|d_obs|          недооценка глубины
     Cm  = (2·ΩTm + Δo,c + Δu) / 4        0=лучший, 1=худший
     """
     sim_wet  = h_max_sim >= threshold
     obs_bool = obs_mask.astype(bool)
+    if eval_mask is not None:
+        ev = np.asarray(eval_mask, dtype=bool)
+        sim_wet = sim_wet & ev
+        obs_bool = obs_bool & ev
 
     n_TP = int(np.sum( sim_wet &  obs_bool))
     n_FP = int(np.sum( sim_wet & ~obs_bool))
@@ -101,13 +109,13 @@ def _compute_sweep_metrics(
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Воркер одиночного прогона — вызывается в дочернем процессе
+# Воркер одиночного прогона — вызывается из SweepWorker или его потоков
 # ──────────────────────────────────────────────────────────────────────────────
 
 def run_one_sample(args: dict) -> dict:
     """
-    Выполняет один LHS-прогон. Вызывается в дочернем процессе
-    (multiprocessing.Pool) или напрямую (последовательный режим).
+    Выполняет один LHS-прогон. Вызывается напрямую (последовательный режим)
+    или в потоке ThreadPoolExecutor (параллельный режим).
 
     Параметры args (все — сериализуемые типы):
         plugin_dir      str         — путь к директории плагина
@@ -131,14 +139,11 @@ def run_one_sample(args: dict) -> dict:
 
     Возвращает row_data dict (включая h_max для отслеживания лучшего прогона).
     """
-    # ── Инициализация пути (нужна в дочернем процессе) ────────────────────────
-    plugin_dir = args.get("plugin_dir", "")
-    if plugin_dir and plugin_dir not in sys.path:
-        sys.path.insert(0, plugin_dir)
-
+    # относительные импорты: модуль входит в пакет `core` плагина, поэтому
+    # верхнеуровневый `core` другого плагина его не подменит (args["plugin_dir"] не нужен)
     try:
-        from core.rheology import OBrienParameters
-        from core.solver   import (TerrainGrid, SimulationConfig,
+        from .rheology import OBrienParameters
+        from .solver   import (TerrainGrid, SimulationConfig,
                                     SourceCondition, InflowSource,
                                     DebrisFlowSolver2D)
     except ImportError as exc:
@@ -175,6 +180,7 @@ def run_one_sample(args: dict) -> dict:
             rho_sediment     = args.get("rho_s", 2650.0),
             rho_water        = args.get("rho_w", 1000.0),
             tau_yield_direct = tau_y,
+            direct_mode      = True,
             eta_direct       = eta,
             manning_n        = n_man,
             K_visc           = k_val,
@@ -203,6 +209,9 @@ def run_one_sample(args: dict) -> dict:
             t_end      = args["t_end"],
             dt_max     = args["dt_max"],
             cfl_number = args["cfl_number"],
+            face_depth_limiter = args.get("face_depth_limiter", True),
+            theta      = args.get("theta", 1.0),
+            cancel_check = args.get("cancel_check"),
         )
 
         result = DebrisFlowSolver2D(
@@ -218,6 +227,7 @@ def run_one_sample(args: dict) -> dict:
             args["obs_cols"],
             args["obs_depths"],
             threshold = args["depth_threshold"],
+            eval_mask = args.get("eval_mask"),
         )
 
         wall_s = time.time() - t0
@@ -226,11 +236,14 @@ def run_one_sample(args: dict) -> dict:
             run_id       = run_id,
             status       = "ok",
             vol_m3       = round(target_vol, 0),
+            vol_in_m3    = round(float(result.total_inflow_vol), 0),
             tau_yield_Pa = round(tau_y,  1),
             eta_Pas      = round(eta,    2),
             manning_n    = round(n_man,  4),
             K_visc       = round(k_val,  1),
             h_max_m      = round(float(result.h_max.max()), 3),
+            edge_h_max_m = round(float(result.edge_h_max), 3),
+            vcap_cells   = int(result.n_vcap_cells),
             h_max        = result.h_max,        # для определения лучшего прогона
             wall_s       = round(wall_s, 1),
             **metrics,
@@ -243,8 +256,8 @@ def run_one_sample(args: dict) -> dict:
 def _error_row(run_id: int, exc: Exception) -> dict:
     """Формирует строку с ошибкой (все числовые поля = None)."""
     null_keys = [
-        "vol_m3", "tau_yield_Pa", "eta_Pas", "manning_n", "K_visc",
-        "h_max_m", "wall_s",
+        "vol_m3", "vol_in_m3", "tau_yield_Pa", "eta_Pas", "manning_n", "K_visc",
+        "h_max_m", "edge_h_max_m", "vcap_cells", "wall_s",
         "TP", "FP", "FN", "omega_Tm", "delta_o_c", "delta_u",
         "Cm", "depth_bias_m",
     ]

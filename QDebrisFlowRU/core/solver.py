@@ -4,7 +4,8 @@
 
 Numba используется если установлена и совместима с NumPy.
 Если нет (например, NumPy 1.20 в QGIS 3.32) — автоматически
-используется чистый NumPy. Физика и результаты идентичны.
+используется чистый NumPy. Физика та же; результаты совпадают с точностью
+до округления (fastmath и порядок операций).
 
 Схема:    Local Inertial Approximation (Bates et al., 2010)
 Реология: O'Brien & Julien (1985, 1988)
@@ -74,7 +75,8 @@ class TerrainGrid:
 
     def __post_init__(self) -> None:
         self.ny, self.nx = self.dem.shape
-        self.mask_valid  = self.dem != self.nodata
+        # ячейки NaN/inf — тоже nodata (в float-растрах GDAL nodata часто задаётся как NaN)
+        self.mask_valid  = (self.dem != self.nodata) & np.isfinite(self.dem)
         # nodata → inf: поток не течёт туда (h_face ≤ 0)
         self._z = np.where(self.mask_valid, self.dem.astype(np.float64), np.inf)
 
@@ -83,9 +85,46 @@ class TerrainGrid:
         return self._z
 
 
+def boundary_cells(mask_valid: np.ndarray) -> np.ndarray:
+    """
+    Валидные ячейки на границе домена: край сетки или соседство с ячейкой
+    nodata. Все граничные грани — непроницаемые стенки (оттока нет), поэтому
+    поток, дошедший до этих ячеек, накапливается там, а не уходит.
+    """
+    m = np.asarray(mask_valid, dtype=bool)
+    b = np.zeros_like(m)
+    b[0, :] = b[-1, :] = True
+    b[:, 0] = b[:, -1] = True
+    inv = ~m
+    b[1:, :] |= inv[:-1, :]
+    b[:-1, :] |= inv[1:, :]
+    b[:, 1:] |= inv[:, :-1]
+    b[:, :-1] |= inv[:, 1:]
+    return b & m
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # InflowSource + SourceCondition + SimulationConfig
 # ─────────────────────────────────────────────────────────────────────────────
+
+def hydrograph_volume(times, q, t0: float, t1: float) -> float:
+    """
+    Точный объём [м³] кусочно-линейного гидрографа Q(t) между t0 и t1.
+    Q = 0 вне [times[0], times[-1]] — то же соглашение, что и в InflowSource.q_at.
+    """
+    times = np.asarray(times, dtype=np.float64)
+    q = np.asarray(q, dtype=np.float64)
+    if times.size < 2 or t1 <= t0:
+        return 0.0
+    a = max(t0, times[0])
+    b = min(t1, times[-1])
+    if b <= a:
+        return 0.0
+    inner = times[np.searchsorted(times, a, side="right"):np.searchsorted(times, b, side="left")]
+    tt = np.concatenate(([a], inner, [b]))
+    qq = np.interp(tt, times, q)
+    return float(np.sum(0.5 * (qq[1:] + qq[:-1]) * np.diff(tt)))
+
 
 @dataclass
 class InflowSource:
@@ -98,6 +137,9 @@ class InflowSource:
 
     def q_at(self, t: float) -> float:
         return float(np.interp(t, self.times, self.q_total, left=0., right=0.))
+
+    def volume_between(self, t0: float, t1: float) -> float:
+        return hydrograph_volume(self.times, self.q_total, t0, t1)
 
     @property
     def n_cells(self) -> int:
@@ -154,6 +196,21 @@ class SimulationConfig:
     cfl_number:        float    = 0.5
     output_interval:   float    = 60.0
     progress_callback: Optional[Callable[[float, float], None]] = None
+    # Ограничитель глубины на грани hf ≤ ½(hL+hR): собственная модификация плагина, литературный
+    # источник не найден (Bates 2010, Cozzolino 2019 и 2021 ур. 20, Landlab: hf = max(η) − max(z)
+    # без него; ранее приписывался Almeida et al. 2012, ур. 2). Замедляет фронт на сухом склоне
+    # (тестовый конус: с ограничителем время прихода больше на 8–13 % при K = 2285, на 15–18 %
+    # при K = 24) и усиливает пульсации в русле. Включён по умолчанию = как в опубликованных расчётах.
+    face_depth_limiter: bool = True
+    # θ-взвешивание расхода в уравнении импульса (de Almeida et al. 2012;
+    # Cozzolino et al. 2021, ур. 19): θ·q + (1−θ)/2·(q_prev + q_next). Гасит колебания
+    # LIA в крутых руслах с малым трением. 1.0 = исходная схема Bates et al. (2010) =
+    # как в опубликованных расчётах; в Landlab по умолчанию 0.8.
+    theta: float = 1.0
+    # вызывается раз за шаг; True останавливает расчёт исключением SimulationCancelled
+    cancel_check: Optional[Callable[[], bool]] = None
+    # глубина [м], при которой ячейка считается достигнутой для t_arrival; None → h_min (плёнка 5 мм)
+    arrival_depth: Optional[float] = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -163,62 +220,114 @@ class SimulationConfig:
 if _NUMBA_AVAILABLE:
 
     @njit(cache=True, fastmath=True, nogil=True)
-    def _lia_step(h, Qx, Qy, z, mask, dx, dy, dt, h_min, n2, K_eta_8gm, tau_gm):
+    def _lia_step(h, Qx, Qy, z, mask, dx, dy, dt, h_min, n2, K_eta_8gm, tau_gm, lim, theta):
         G = 9.81
         ny, nx = h.shape[0], h.shape[1]
         nxm, nym = nx - 1, ny - 1
 
         # X-грани
-        Qx_new = np.empty_like(Qx)
+        # Пробный поток F (инерция + давление) и полунеявный знаменатель d.
+        # Маннинг (квадр.) и вязкость (лин.) — полунеявно (Bates 2010) со СВЯЗАННЫМ
+        # трением: |q| включает поперечную компоненту, осреднённую по четырём соседним
+        # граням (Cozzolino et al. 2021, ур. 19-21; de Almeida & Bates 2013)
+        Fx = np.zeros_like(Qx); Dx = np.zeros_like(Qx)
         for i in range(ny):
             for j in range(nxm):
                 if not (mask[i, j] and mask[i, j+1]):
-                    Qx_new[i, j] = 0.0; continue
+                    continue
                 eL = z[i, j]   + h[i, j]
                 eR = z[i, j+1] + h[i, j+1]
                 hf = (eL if eL > eR else eR) - (z[i,j] if z[i,j] > z[i,j+1] else z[i,j+1])
                 if hf != hf or hf <= h_min:
-                    Qx_new[i, j] = 0.0; continue
-                hf = min(hf, 0.5*(h[i, j] + h[i, j+1]))   # лимитер Almeida et al. (2012), ур. 2
+                    continue
+                if lim: hf = min(hf, 0.5*(h[i, j] + h[i, j+1]))   # ограничитель hf ≤ ½(hL+hR) — по выбору, см. SimulationConfig.face_depth_limiter
                 if hf <= h_min:
-                    Qx_new[i, j] = 0.0; continue
+                    continue
                 q  = Qx[i, j]
-                vm = (q if q >= 0. else -q) / hf
-                # Маннинг (квадр.) и вязкость (лин.) — полунеявно в знаменатель (Bates 2010)
-                # τy/(γm·h) — явный импульс после шага 1 (O'Brien & Julien 1988)
+                qm = q   # θ-взвешивание (de Almeida et al. 2012); соседи вне домена/nodata не учитываются
+                if theta < 1.:
+                    nb = 0; s = 0.
+                    if j > 0 and mask[i, j-1]:     s += Qx[i, j-1]; nb += 1
+                    if j < nxm-1 and mask[i, j+2]: s += Qx[i, j+1]; nb += 1
+                    if nb == 2:   qm = theta*q + (1.-theta)*0.5*s
+                    elif nb == 1: qm = theta*q + (1.-theta)*s
+                qt = 0.
+                if i > 0:   qt += Qy[i-1, j] + Qy[i-1, j+1]
+                if i < nym: qt += Qy[i, j]   + Qy[i, j+1]
+                qt *= 0.25
+                vm = (q*q + qt*qt)**0.5 / hf
                 sf = n2 * vm / hf**(4./3.) + K_eta_8gm / hf**2
                 d  = 1. + G * dt * sf
                 if d < 1.: d = 1.
-                q_star = (q - G * hf * dt * (eR - eL) / dx) / d
-                yi = G * dt * tau_gm          # τy-импульс = g·Δt·τy/γm [м²/с]
-                aq = q_star if q_star >= 0. else -q_star
-                Qx_new[i, j] = 0. if aq <= yi else q_star - (yi if q_star >= 0. else -yi)
+                Fx[i, j] = qm - G * hf * dt * (eR - eL) / dx
+                Dx[i, j] = d
 
         # Y-грани
-        Qy_new = np.empty_like(Qy)
+        Fy = np.zeros_like(Qy); Dy = np.zeros_like(Qy)
         for i in range(nym):
             for j in range(nx):
                 if not (mask[i, j] and mask[i+1, j]):
-                    Qy_new[i, j] = 0.0; continue
+                    continue
                 eU = z[i, j]   + h[i, j]
                 eD = z[i+1, j] + h[i+1, j]
                 hf = (eU if eU > eD else eD) - (z[i,j] if z[i,j] > z[i+1,j] else z[i+1,j])
                 if hf != hf or hf <= h_min:
-                    Qy_new[i, j] = 0.0; continue
-                hf = min(hf, 0.5*(h[i, j] + h[i+1, j]))
+                    continue
+                if lim: hf = min(hf, 0.5*(h[i, j] + h[i+1, j]))
                 if hf <= h_min:
-                    Qy_new[i, j] = 0.0; continue
+                    continue
                 q  = Qy[i, j]
-                vm = (q if q >= 0. else -q) / hf
+                qm = q
+                if theta < 1.:
+                    nb = 0; s = 0.
+                    if i > 0 and mask[i-1, j]:     s += Qy[i-1, j]; nb += 1
+                    if i < nym-1 and mask[i+2, j]: s += Qy[i+1, j]; nb += 1
+                    if nb == 2:   qm = theta*q + (1.-theta)*0.5*s
+                    elif nb == 1: qm = theta*q + (1.-theta)*s
+                qt = 0.
+                if j > 0:   qt += Qx[i, j-1] + Qx[i+1, j-1]
+                if j < nxm: qt += Qx[i, j]   + Qx[i+1, j]
+                qt *= 0.25
+                vm = (q*q + qt*qt)**0.5 / hf
                 sf = n2 * vm / hf**(4./3.) + K_eta_8gm / hf**2
                 d  = 1. + G * dt * sf
                 if d < 1.: d = 1.
-                q_star = (q - G * hf * dt * (eD - eU) / dy) / d
-                yi = G * dt * tau_gm
-                aq = q_star if q_star >= 0. else -q_star
-                Qy_new[i, j] = 0. if aq <= yi else q_star - (yi if q_star >= 0. else -yi)
+                Fy[i, j] = qm - G * hf * dt * (eD - eU) / dy
+                Dy[i, j] = d
 
-        # Ограничитель оттока — двухпроходная схема (идентична NumPy-бэкенду)
+        # Предел текучести τy/(γm·h) из Sf FLO-2D действует против ВЕКТОРА пробного потока
+        # (изотропно): покой при |F| ≤ g·Δt·τy/γm, иначе |F| уменьшается на этот импульс
+        # ДО деления на d → движение начинается при hf·|∇η| > τy/γm (= rheology.h_stop)
+        # при любом направлении потока, Δt, η и K
+        yi = G * dt * tau_gm
+        Qx_new = np.zeros_like(Qx)
+        for i in range(ny):
+            for j in range(nxm):
+                d = Dx[i, j]
+                if d <= 0.: continue
+                F  = Fx[i, j]
+                ft = 0.
+                if i > 0:   ft += Fy[i-1, j] + Fy[i-1, j+1]
+                if i < nym: ft += Fy[i, j]   + Fy[i, j+1]
+                ft *= 0.25
+                aF = (F*F + ft*ft)**0.5
+                if aF > yi:
+                    Qx_new[i, j] = F * (1. - yi / aF) / d
+        Qy_new = np.zeros_like(Qy)
+        for i in range(nym):
+            for j in range(nx):
+                d = Dy[i, j]
+                if d <= 0.: continue
+                F  = Fy[i, j]
+                ft = 0.
+                if j > 0:   ft += Fx[i, j-1] + Fx[i+1, j-1]
+                if j < nxm: ft += Fx[i, j]   + Fx[i+1, j]
+                ft *= 0.25
+                aF = (F*F + ft*ft)**0.5
+                if aF > yi:
+                    Qy_new[i, j] = F * (1. - yi / aF) / d
+
+        # Ограничитель оттока — та же двухпроходная схема, что в NumPy-бэкенде
         # Проход 1: коэффициент sc для каждой ячейки
         sc = np.ones((ny, nx), dtype=np.float64)
         for i in range(ny):
@@ -281,13 +390,14 @@ if _NUMBA_AVAILABLE:
             h[rows[k], cols[k]] += rate * dt
 
     @njit(cache=True, fastmath=True, nogil=True)
-    def _update_max(h, Qx, Qy, h_max, V_max, t_arrival, h_min, t):
+    def _update_max(h, Qx, Qy, h_max, V_max, t_arrival, h_min, t, HV2_max, Fr_hv2, h_arr):
         ny, nx = h.shape[0], h.shape[1]
         nxm, nym = nx - 1, ny - 1
         for i in range(ny):
             for j in range(nx):
                 hv = h[i, j]
                 if hv > h_max[i, j]: h_max[i, j] = hv
+                if hv >= h_arr and t_arrival[i, j] > 1e30: t_arrival[i, j] = t   # приход: первый момент, когда глубина достигла h_arr
                 if hv < h_min: continue
                 hd = hv if hv > h_min else h_min
                 qx = 0.
@@ -300,12 +410,43 @@ if _NUMBA_AVAILABLE:
                 elif i == ny-1 and nym > 0: qy = Qy[nym-1, j]
                 vm = min((qx*qx+qy*qy)**0.5/hd, 30.)
                 if vm > V_max[i, j]: V_max[i, j] = vm
-                if t_arrival[i, j] > 1e30: t_arrival[i, j] = t
+                hv2 = hv * vm * vm          # мгновенное h·v² [м³/с²]
+                if hv2 > HV2_max[i, j]:
+                    HV2_max[i, j] = hv2
+                    Fr_hv2[i, j] = vm / (9.81 * hd)**0.5   # число Фруда V/√(g·h) в момент пика h·v²
 
 else:
     # ── NumPy fallback ────────────────────────────────────────────────────────
 
-    def _lia_step(h, Qx, Qy, z, mask, dx, dy, dt, h_min, n2, K_eta_8gm, tau_gm):
+    def _theta_mean(Q, valid, theta, axis):
+        """θ-взвешенный расход θ·q + (1−θ)/2·(q_prev + q_next) (de Almeida et al. 2012);
+        соседи вне домена или у nodata отбрасываются (при одном соседе веса θ и 1−θ)."""
+        if theta >= 1.0:
+            return Q
+        prev = np.zeros_like(Q); nxt = np.zeros_like(Q)
+        vp = np.zeros(Q.shape, dtype=bool); vn = np.zeros(Q.shape, dtype=bool)
+        if axis == 1:
+            prev[:, 1:] = Q[:, :-1]; vp[:, 1:] = valid[:, :-1]
+            nxt[:, :-1] = Q[:, 1:];  vn[:, :-1] = valid[:, 1:]
+        else:
+            prev[1:, :] = Q[:-1, :]; vp[1:, :] = valid[:-1, :]
+            nxt[:-1, :] = Q[1:, :];  vn[:-1, :] = valid[1:, :]
+        n = vp.astype(np.int64) + vn.astype(np.int64)
+        tot = np.where(vp, prev, 0.) + np.where(vn, nxt, 0.)
+        return np.where(n == 2, theta*Q + (1.-theta)*0.5*tot,
+                        np.where(n == 1, theta*Q + (1.-theta)*tot, Q))
+
+    def _avg4_y_to_x(A):
+        """Среднее четырёх значений на y-гранях вокруг каждой x-грани (нет грани = 0)."""
+        P = np.zeros((A.shape[0] + 2, A.shape[1])); P[1:-1, :] = A
+        return 0.25 * (P[:-1, :-1] + P[:-1, 1:] + P[1:, :-1] + P[1:, 1:])
+
+    def _avg4_x_to_y(A):
+        """Среднее четырёх значений на x-гранях вокруг каждой y-грани (нет грани = 0)."""
+        P = np.zeros((A.shape[0], A.shape[1] + 2)); P[:, 1:-1] = A
+        return 0.25 * (P[:-1, :-1] + P[:-1, 1:] + P[1:, :-1] + P[1:, 1:])
+
+    def _lia_step(h, Qx, Qy, z, mask, dx, dy, dt, h_min, n2, K_eta_8gm, tau_gm, lim, theta):
         G  = 9.81
         mv = mask
         eta = z + h
@@ -315,34 +456,40 @@ else:
         hf_x = np.maximum(np.nan_to_num(
             np.maximum(eL, eR) - np.maximum(z[:,:-1], z[:,1:]),
             nan=0., posinf=0.), 0.)
-        hf_x = np.minimum(hf_x, 0.5*(h[:,:-1]+h[:,1:]))           # лимитер Almeida et al. (2012)
+        if lim: hf_x = np.minimum(hf_x, 0.5*(h[:,:-1]+h[:,1:]))   # ограничитель по выбору, см. SimulationConfig.face_depth_limiter
         wet_x = (hf_x > h_min) & mv[:, :-1] & mv[:, 1:]
-        vm_x  = np.abs(Qx) / np.maximum(hf_x, 1e-12)
-        sf_x  = (n2 * vm_x / np.maximum(hf_x,1e-12)**(4./3.)
-                 + K_eta_8gm / np.maximum(hf_x,1e-12)**2)
-        denom_x = np.maximum(1. + G*dt*sf_x, 1.)
-        q_star_x = np.where(wet_x,
-                            (Qx - G*hf_x*dt*np.nan_to_num((eR-eL)/dx)) / denom_x, 0.)
-        # τy — явный импульс с ограничением инверсии знака (O'Brien & Julien 1988)
-        yield_impulse = G * dt * tau_gm
-        Qx_new = np.where(np.abs(q_star_x) > yield_impulse,
-                          q_star_x - yield_impulse * np.sign(q_star_x), 0.)
 
         # Y-грани
         eU, eD = eta[:-1, :], eta[1:, :]
         hf_y = np.maximum(np.nan_to_num(
             np.maximum(eU, eD) - np.maximum(z[:-1,:], z[1:,:]),
             nan=0., posinf=0.), 0.)
-        hf_y = np.minimum(hf_y, 0.5*(h[:-1,:]+h[1:,:]))
+        if lim: hf_y = np.minimum(hf_y, 0.5*(h[:-1,:]+h[1:,:]))
         wet_y = (hf_y > h_min) & mv[:-1,:] & mv[1:,:]
-        vm_y  = np.abs(Qy) / np.maximum(hf_y, 1e-12)
-        sf_y  = (n2 * vm_y / np.maximum(hf_y,1e-12)**(4./3.)
-                 + K_eta_8gm / np.maximum(hf_y,1e-12)**2)
+
+        # Связанное трение (Cozzolino et al. 2021, ур. 19-21): |q| включает поперечную
+        # компоненту, осреднённую по четырём соседним граням
+        hfx = np.maximum(hf_x, 1e-12); hfy = np.maximum(hf_y, 1e-12)
+        sf_x = (n2 * np.sqrt(Qx**2 + _avg4_y_to_x(Qy)**2) / hfx / hfx**(4./3.)
+                + K_eta_8gm / hfx**2)
+        sf_y = (n2 * np.sqrt(Qy**2 + _avg4_x_to_y(Qx)**2) / hfy / hfy**(4./3.)
+                + K_eta_8gm / hfy**2)
+        denom_x = np.maximum(1. + G*dt*sf_x, 1.)
         denom_y = np.maximum(1. + G*dt*sf_y, 1.)
-        q_star_y = np.where(wet_y,
-                            (Qy - G*hf_y*dt*np.nan_to_num((eD-eU)/dy)) / denom_y, 0.)
-        Qy_new = np.where(np.abs(q_star_y) > yield_impulse,
-                          q_star_y - yield_impulse * np.sign(q_star_y), 0.)
+        qm_x = _theta_mean(Qx, mv[:, :-1] & mv[:, 1:], theta, 1)
+        qm_y = _theta_mean(Qy, mv[:-1, :] & mv[1:, :], theta, 0)
+        F_x = np.where(wet_x, qm_x - G*hf_x*dt*np.nan_to_num((eR-eL)/dx), 0.)
+        F_y = np.where(wet_y, qm_y - G*hf_y*dt*np.nan_to_num((eD-eU)/dy), 0.)
+
+        # τy действует против ВЕКТОРА пробного потока (изотропно): покой при |F| ≤ g·Δt·τy/γm,
+        # иначе |F| уменьшается на импульс текучести до деления на знаменатель
+        yield_impulse = G * dt * tau_gm
+        Fm_x = np.sqrt(F_x**2 + _avg4_y_to_x(F_y)**2)
+        Fm_y = np.sqrt(F_y**2 + _avg4_x_to_y(F_x)**2)
+        Qx_new = np.where(wet_x & (Fm_x > yield_impulse),
+                          F_x * (1. - yield_impulse / np.maximum(Fm_x, 1e-300)) / denom_x, 0.)
+        Qy_new = np.where(wet_y & (Fm_y > yield_impulse),
+                          F_y * (1. - yield_impulse / np.maximum(Fm_y, 1e-300)) / denom_y, 0.)
 
         # Ограничитель оттока
         ox = np.zeros_like(h)
@@ -372,7 +519,7 @@ else:
     def _add_inflow(h, rows, cols, rate, dt):
         h[rows, cols] += rate * dt
 
-    def _update_max(h, Qx, Qy, h_max, V_max, t_arrival, h_min, t):
+    def _update_max(h, Qx, Qy, h_max, V_max, t_arrival, h_min, t, HV2_max, Fr_hv2, h_arr):
         np.maximum(h_max, h, out=h_max)
         ny, nx = h.shape
         hd = np.maximum(h, h_min)
@@ -380,9 +527,13 @@ else:
         Qxc[:,1:-1]=0.5*(Qx[:,:-1]+Qx[:,1:]); Qxc[:,0]=Qx[:,0]; Qxc[:,-1]=Qx[:,-1]
         Qyc = np.zeros((ny, nx))
         Qyc[1:-1,:]=0.5*(Qy[:-1,:]+Qy[1:,:]); Qyc[0,:]=Qy[0,:]; Qyc[-1,:]=Qy[-1,:]
-        vm = np.minimum(np.sqrt(Qxc**2+Qyc**2)/hd, 30.)
+        vm = np.where(h >= h_min, np.minimum(np.sqrt(Qxc**2+Qyc**2)/hd, 30.), 0.)   # сухие ячейки (h < h_min) скорости не получают — как в ядре Numba
         np.maximum(V_max, vm, out=V_max)
-        t_arrival[(h >= h_min) & np.isinf(t_arrival)] = t
+        hv2 = np.where(h >= h_min, h * vm**2, 0.)     # мгновенное h·v² [м³/с²]
+        up = hv2 > HV2_max   # число Фруда V/√(g·h) в момент пика h·v²
+        Fr_hv2[up] = (vm / np.sqrt(9.81 * hd))[up]
+        np.maximum(HV2_max, hv2, out=HV2_max)
+        t_arrival[(h >= h_arr) & np.isinf(t_arrival)] = t
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -401,11 +552,13 @@ def warmup_jit(h_min: float = 0.005) -> float:
     hm = np.zeros((4,4),dtype=np.float64)
     vm = np.zeros((4,4),dtype=np.float64)
     ta = np.full((4,4), np.inf, dtype=np.float64)
+    hv = np.zeros((4,4),dtype=np.float64)
+    fr = np.zeros((4,4),dtype=np.float64)
     r  = np.zeros(2, dtype=np.int64)
     c  = np.arange(2, dtype=np.int64)
-    _lia_step(h,Qx,Qy,z,mv,10.,10.,1.,h_min,0.0036,1e-4,0.001)
+    _lia_step(h,Qx,Qy,z,mv,10.,10.,1.,h_min,0.0036,1e-4,0.001,True,0.8)
     _cfl_vol_wet(h,mv,0.4,10.,10.,10.,h_min)
-    _update_max(h,Qx,Qy,hm,vm,ta,h_min,0.)
+    _update_max(h,Qx,Qy,hm,vm,ta,h_min,0.,hv,fr,h_min)
     _add_inflow(h,r,c,0.1,1.0)
     return time.time()-t0
 
@@ -413,6 +566,10 @@ def warmup_jit(h_min: float = 0.005) -> float:
 # ─────────────────────────────────────────────────────────────────────────────
 # Главный решатель
 # ─────────────────────────────────────────────────────────────────────────────
+
+class SimulationCancelled(RuntimeError):
+    """Выбрасывается DebrisFlowSolver2D.run, когда SimulationConfig.cancel_check() вернул True."""
+
 
 class DebrisFlowSolver2D:
 
@@ -430,6 +587,8 @@ class DebrisFlowSolver2D:
         self.h_max     = np.zeros((ny, nx), dtype=np.float64)
         self.V_max     = np.zeros((ny, nx), dtype=np.float64)
         self.t_arrival = np.full((ny, nx), np.inf, dtype=np.float64)
+        self.HV2_max   = np.zeros((ny, nx), dtype=np.float64)
+        self.Fr_hv2    = np.zeros((ny, nx), dtype=np.float64)
 
         self.t               = 0.0
         self.n_steps         = 0
@@ -452,7 +611,24 @@ class DebrisFlowSolver2D:
             self.h[:] = np.maximum(self.source.h0_array, 0.)
         self.h[~self.terrain.mask_valid] = 0.
         np.copyto(self.h_max, self.h)
-        self.t_arrival[self.h > self.params.h_min] = 0.
+        self._h_init = self.h.copy()
+        ad = self.config.arrival_depth
+        self._h_arr = self.params.h_min if ad is None else max(float(ad), self.params.h_min)
+        self.t_arrival[self.h > self._h_arr] = 0.
+        # ячейки источника на nodata молча уничтожали бы введённый объём → отбрасываем их
+        # и распределяем приток по оставшимся ячейкам того же источника
+        self._sources = []
+        for s in self.source.inflow_sources:
+            keep = self.terrain.mask_valid[s.rows, s.cols]
+            if not keep.any():
+                log.warning(f"Источник '{s.name}' целиком на ячейках nodata — пропущен")
+                continue
+            if not keep.all():
+                log.warning(f"Источник '{s.name}': {int((~keep).sum())} из {s.n_cells} ячеек — "
+                            "nodata; приток распределён по остальным ячейкам")
+            self._sources.append(InflowSource(
+                rows=np.asarray(s.rows)[keep], cols=np.asarray(s.cols)[keep],
+                times=s.times, q_total=s.q_total, name=s.name))
         self.volume_initial = np.sum(self.h)*self.terrain.dx*self.terrain.dy
 
         backend = "Numba JIT" if _NUMBA_AVAILABLE else "NumPy"
@@ -497,38 +673,67 @@ class DebrisFlowSolver2D:
         h_min  = self.params.h_min
         n2     = self._n2; Ke = self._K_eta_8gm; ty = self._tau_gm
         cfl    = self.config.cfl_number; dmin = self._dx_min
+        lim    = bool(self.config.face_depth_limiter)
+        theta  = float(self.config.theta)
         dt_max = self.config.dt_max; dt_min = self.config.dt_min
         t_end  = self.config.t_end; out_iv = self.config.output_interval
         cell_area = dx * dy
 
         t_sim = 0.; t_last = 0.; ever_wet = False; t_wall = time.time()
+        inflow_done = False
+        cancel = self.config.cancel_check
 
         while t_sim < t_end:
+            if cancel is not None and cancel():
+                raise SimulationCancelled(f"отменено пользователем при t = {t_sim:.1f} с")
 
             dt_cfl, V, wet = _cfl_vol_wet(h, mv, cfl, dmin, dx, dy, h_min)
-            dt = min(dt_cfl, dt_max, t_end - t_sim)
+            dt = min(dt_cfl, dt_max)
+            # CFL должно выполняться и для глубины, которую приток добавит за этот шаг (на
+            # сухом домене dt_cfl = 1e9, и первый шаг иначе шёл бы с dt_max)
+            for src in self._sources:
+                v_in = src.volume_between(t_sim, t_sim + dt)
+                if v_in > 0.:
+                    h_src = (float(h[src.rows, src.cols].max())
+                             + v_in / (src.n_cells * cell_area))
+                    dt = min(dt, cfl * dmin / (GRAVITY * h_src)**0.5)
             if dt < dt_min:
                 raise RuntimeError(f"CFL шаг {dt:.6f} с < dt_min={dt_min} с")
+            # dt_min ограничивает только шаг устойчивости; последний шаг может быть
+            # короче dt_min, чтобы точно выйти на t_end
+            dt = min(dt, t_end - t_sim)
 
-            for src in self.source.inflow_sources:
-                q_t = src.q_at(t_sim)
-                if q_t > 0.:
-                    rate = q_t / (src.n_cells * cell_area)
-                    self._total_inflow_vol += q_t * dt
+            # приток: точный объём кусочно-линейного Q(t) на [t, t+dt] (а не Q(t)·dt)
+            for src in self._sources:
+                v_in = src.volume_between(t_sim, t_sim + dt)
+                if v_in > 0.:
+                    rate = v_in / (dt * src.n_cells * cell_area)
+                    self._total_inflow_vol += v_in
                     if _NUMBA_AVAILABLE:
                         _add_inflow(h, src.rows.astype(np.int64),
                                     src.cols.astype(np.int64), rate, dt)
                     else:
                         h[src.rows, src.cols] += rate * dt
 
-            h, Qx, Qy = _lia_step(h, Qx, Qy, z, mv, dx, dy, dt, h_min, n2, Ke, ty)
-            _update_max(h, Qx, Qy, self.h_max, self.V_max, self.t_arrival, h_min, t_sim)
+            h, Qx, Qy = _lia_step(h, Qx, Qy, z, mv, dx, dy, dt, h_min, n2, Ke, ty, lim, theta)
+            _update_max(h, Qx, Qy, self.h_max, self.V_max, self.t_arrival, h_min, t_sim + dt,
+                        self.HV2_max, self.Fr_hv2, self._h_arr)
 
+            # объём на НАЧАЛО шага (до притока) → метка t_sim; пишется раз в output_interval
+            # (запись на каждом шаге на длинных прогонах занимала бы гигабайты)
+            if not self.volume_history or t_sim - self.volume_history[-1][0] >= out_iv:
+                self.volume_history.append((t_sim, V))
             t_sim += dt; self.n_steps += 1
-            self.volume_history.append((t_sim, V))
 
             if not ever_wet and wet > 0:
                 ever_wet = True
+
+            # все расходы на гранях ровно 0 и притока больше не будет → состояние неподвижно
+            # (проверка текучести |F| ≤ g·Δt·τy/γm не зависит от Δt) — останавливаемся
+            if not inflow_done:
+                inflow_done = all(s.volume_between(t_sim, t_end) <= 0. for s in self._sources)
+            if inflow_done and ever_wet and not Qx.any() and not Qy.any():
+                log.info(f"Поток остановился и притока больше нет: остановка при t={t_sim:.1f} с"); break
 
             if t_sim - t_last >= out_iv:
                 self.h[:]=h; self.Qx[:]=Qx; self.Qy[:]=Qy
@@ -542,6 +747,18 @@ class DebrisFlowSolver2D:
                 log.info(f"Поток остановился t={t_sim:.1f} с"); break
 
         self.h[:]=h; self.Qx[:]=Qx; self.Qy[:]=Qy; self.t=t_sim
+        # финальный объём (после последнего шага) — его использует volume_balance()
+        self.volume_history.append((t_sim, float(np.sum(h[mv])) * cell_area))
+        # граничные ячейки, куда действительно пришёл поток (глубина выросла на ≥ h_min над начальной)
+        bnd = boundary_cells(self.terrain.mask_valid) & (self.h_max - self._h_init >= h_min)
+        edge_h_max = float(self.h_max[bnd].max()) if bnd.any() else 0.0
+        if edge_h_max >= h_min:
+            log.warning(f"Поток дошёл до непроницаемой стенки (край домена или ячейки nodata): h_max у стенки = "
+                        f"{edge_h_max:.3f} м — жидкость накапливается там, а не уходит")
+        n_vcap = int(np.sum(self.V_max >= 30.0 - 1e-9))   # V ограничена 30 м/с в _update_max
+        if n_vcap:
+            log.warning(f"Скорость упёрлась в предел 30 м/с в {n_vcap} ячейках — признак колебаний "
+                        f"LIA (см. theta) или ячеек, опустошённых за один шаг")
         log.info(f"Завершено [{backend}]: {self.n_steps} шагов, "
                  f"{t_sim:.1f} с, {time.time()-t_wall:.2f} с CPU")
 
@@ -553,6 +770,10 @@ class DebrisFlowSolver2D:
             params=self.params, terrain=self.terrain,
             total_inflow_vol=self._total_inflow_vol,
             initial_volume=self.volume_initial,
+            HV2_max=self.HV2_max,
+            Fr_hv2=self.Fr_hv2,
+            edge_h_max=edge_h_max,
+            n_vcap_cells=n_vcap,
         )
 
 
@@ -573,6 +794,20 @@ class SimulationResult:
     terrain:          TerrainGrid
     total_inflow_vol: float = 0.0
     initial_volume:   float = 0.0
+    # максимум по времени МГНОВЕННОГО произведения h(t)·v(t)² [м³/с²] (поток импульса
+    # на единицу ширины / ρm). Всегда ≤ h_max·V_max²: то произведение соединяет две
+    # раздельные огибающие (скорость фронта с глубиной тела) и даёт лишь верхнюю оценку.
+    HV2_max:          Optional[np.ndarray] = None
+    # Число Фруда V/√(g·h) в момент пикового потока импульса h·v² в каждой ячейке.
+    # LIA хорошо согласуется с полными уравнениями мелкой воды лишь при Fr < 0.5, выше
+    # ошибки растут (de Almeida & Bates 2013). Простой max_t(Fr) как диагностика
+    # бесполезен: его задаёт тонкая плёнка на фронте (h ≈ h_min), где V/√(g·h) огромно;
+    # Fr в момент пика h·v² характеризует основное тело потока.
+    Fr_hv2:           Optional[np.ndarray] = None
+    # максимум h_max по граничным ячейкам (край сетки / соседство с nodata); > h_min → поток у стенки
+    edge_h_max:       float = 0.0
+    # число ячеек, где скорость упёрлась в предел 30 м/с (> 0 → V_max/HV2_max там ненадёжны)
+    n_vcap_cells:     int = 0
 
     def max_inundation_area(self, h_threshold: float = 0.01) -> float:
         return np.sum(self.h_max > h_threshold) * self.terrain.dx * self.terrain.dy
